@@ -112,7 +112,7 @@ public final class SettingsActivity extends Activity {
         root.addView(Ui.divider(this));
 
         root.addView(Ui.sectionTitle(this, "关于"));
-        LinearLayout about = labels("潜溪课表 1.0.0", "课程数据与教务页面只在本机处理 · MIT License");
+        LinearLayout about = labels("潜溪课表 1.1.0", "课程数据与教务页面只在本机处理 · MIT License");
         about.setPadding(Ui.dp(this, 20), 0, Ui.dp(this, 20), 0);
         root.addView(about, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 70)));

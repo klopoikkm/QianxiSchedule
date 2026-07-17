@@ -8,6 +8,7 @@ import android.graphics.RectF;
 import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
+import android.text.TextUtils;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -63,8 +64,8 @@ public final class ScheduleView extends View {
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        int wantedWidth = Ui.dp(getContext(), 720);
-        int wantedHeight = Ui.dp(getContext(), 980);
+        int wantedWidth = Ui.dp(getContext(), 360);
+        int wantedHeight = Ui.dp(getContext(), 760);
         setMeasuredDimension(resolveSize(wantedWidth, widthMeasureSpec),
                 resolveSize(wantedHeight, heightMeasureSpec));
     }
@@ -73,8 +74,8 @@ public final class ScheduleView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         hitAreas.clear();
-        float timeWidth = Ui.dp(getContext(), 50);
-        float headerHeight = Ui.dp(getContext(), 52);
+        float timeWidth = Ui.dp(getContext(), 34);
+        float headerHeight = Ui.dp(getContext(), 48);
         float dayWidth = (getWidth() - timeWidth) / 7f;
         float minuteHeight = (getHeight() - headerHeight) / (float) (END_MINUTE - START_MINUTE);
 
@@ -99,8 +100,8 @@ public final class ScheduleView extends View {
 
     private void drawGrid(Canvas canvas, float timeWidth, float headerHeight,
                           float dayWidth, float minuteHeight) {
-        String[] names = {"周一", "周二", "周三", "周四", "周五", "周六", "周日"};
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("M.d", Locale.CHINA);
+        String[] names = {"一", "二", "三", "四", "五", "六", "日"};
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("d", Locale.CHINA);
         paint.setStrokeWidth(Ui.dp(getContext(), 1));
         paint.setColor(Ui.LINE);
 
@@ -114,15 +115,17 @@ public final class ScheduleView extends View {
             float y = headerHeight + (hour * 60 - START_MINUTE) * minuteHeight;
             paint.setColor(hour == 7 ? Ui.LINE : Color.rgb(235, 237, 234));
             canvas.drawLine(timeWidth, y, getWidth(), y, paint);
-            drawCenteredText(canvas, String.format(Locale.CHINA, "%02d:00", hour),
-                    timeWidth / 2f, y + Ui.dp(getContext(), 12), 10, Ui.MUTED, false);
+            drawCenteredText(canvas, String.format(Locale.CHINA, "%02d", hour),
+                    timeWidth / 2f, y + Ui.dp(getContext(), 10), 9, Ui.MUTED, false);
         }
 
         for (int day = 0; day < 7; day++) {
             float center = timeWidth + (day + 0.5f) * dayWidth;
-            drawCenteredText(canvas, names[day], center, Ui.dp(getContext(), 20), 12, Ui.INK, true);
+            boolean today = weekStart.plusDays(day).equals(LocalDate.now());
+            drawCenteredText(canvas, names[day], center, Ui.dp(getContext(), 19), 11,
+                    today ? Ui.PRIMARY : Ui.INK, true);
             drawCenteredText(canvas, weekStart.plusDays(day).format(formatter), center,
-                    Ui.dp(getContext(), 40), 11, Ui.MUTED, false);
+                    Ui.dp(getContext(), 38), 9, today ? Ui.PRIMARY : Ui.MUTED, false);
         }
     }
 
@@ -133,11 +136,11 @@ public final class ScheduleView extends View {
         for (Course course : courses) {
             int laneCount = Math.max(1, laneCounts.getOrDefault(course.dayOfWeek, 1));
             int lane = lanes.getOrDefault(course, 0);
-            float available = dayWidth - Ui.dp(getContext(), 5);
+            float available = dayWidth - Ui.dp(getContext(), 2);
             float blockWidth = available / laneCount;
             float left = timeWidth + (course.dayOfWeek - 1) * dayWidth
-                    + Ui.dp(getContext(), 2) + lane * blockWidth;
-            float right = left + blockWidth - Ui.dp(getContext(), 2);
+                    + Ui.dp(getContext(), 1) + lane * blockWidth;
+            float right = left + blockWidth - Ui.dp(getContext(), 1);
             float top = headerHeight + (Math.max(START_MINUTE, course.startMinute) - START_MINUTE) * minuteHeight + 1;
             float bottom = headerHeight + (Math.min(END_MINUTE, course.endMinute) - START_MINUTE) * minuteHeight - 1;
             if (bottom <= top) continue;
@@ -148,9 +151,8 @@ public final class ScheduleView extends View {
             canvas.drawRoundRect(rect, Ui.dp(getContext(), 5), Ui.dp(getContext(), 5), paint);
 
             StringBuilder label = new StringBuilder(course.name);
-            if (!course.location.isEmpty()) label.append("\n").append(course.location);
-            if (!course.teacher.isEmpty() && bottom - top > Ui.dp(getContext(), 72)) {
-                label.append("\n").append(course.teacher);
+            if (!course.location.isEmpty() && bottom - top > Ui.dp(getContext(), 58)) {
+                label.append("\n").append(course.location);
             }
             drawCourseText(canvas, label.toString(), rect);
         }
@@ -174,16 +176,22 @@ public final class ScheduleView extends View {
     }
 
     private void drawCourseText(Canvas canvas, String value, RectF rect) {
-        int padding = Ui.dp(getContext(), 5);
+        int padding = Ui.dp(getContext(), 2);
         textPaint.setColor(Color.WHITE);
-        textPaint.setTextSize(Ui.dp(getContext(), 11));
+        textPaint.setTextSize(Ui.sp(getContext(), 9));
         textPaint.setFakeBoldText(true);
         int width = Math.max(1, (int) rect.width() - padding * 2);
         canvas.save();
         canvas.clipRect(rect);
         canvas.translate(rect.left + padding, rect.top + padding);
-        StaticLayout layout = new StaticLayout(value, textPaint, width,
-                Layout.Alignment.ALIGN_NORMAL, 1.05f, 0, false);
+        int maxLines = Math.max(1, (int) ((rect.height() - padding * 2) / Ui.sp(getContext(), 11)));
+        StaticLayout layout = StaticLayout.Builder.obtain(value, 0, value.length(), textPaint, width)
+                .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                .setLineSpacing(0, 1.0f)
+                .setIncludePad(false)
+                .setEllipsize(TextUtils.TruncateAt.END)
+                .setMaxLines(maxLines)
+                .build();
         layout.draw(canvas);
         canvas.restore();
     }
@@ -207,7 +215,7 @@ public final class ScheduleView extends View {
     private void drawCenteredText(Canvas canvas, String value, float x, float baseline,
                                   float sp, int color, boolean bold) {
         paint.setColor(color);
-        paint.setTextSize(Ui.dp(getContext(), sp));
+        paint.setTextSize(Ui.sp(getContext(), sp));
         paint.setTypeface(bold ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
         paint.setTextAlign(Paint.Align.CENTER);
         canvas.drawText(value, x, baseline, paint);
@@ -230,8 +238,8 @@ public final class ScheduleView extends View {
                     return true;
                 }
             }
-            float timeWidth = Ui.dp(getContext(), 50);
-            float headerHeight = Ui.dp(getContext(), 52);
+            float timeWidth = Ui.dp(getContext(), 34);
+            float headerHeight = Ui.dp(getContext(), 48);
             if (event.getX() > timeWidth && event.getY() > headerHeight && listener != null) {
                 int day = Math.max(1, Math.min(7,
                         (int) ((event.getX() - timeWidth) / ((getWidth() - timeWidth) / 7f)) + 1));
