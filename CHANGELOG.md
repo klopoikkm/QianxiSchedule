@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.0
+
+- Added a dedicated Northeastern University at Qinhuangdao EAMS adapter.
+- Discovered the internal student id and current semester from the authenticated course-table page.
+- Requested and rendered the EAMS personal timetable from the home page login session.
+- Warned before saving a manually edited course that overlaps an existing active week.
+- Reported existing-schedule conflicts in the import preview.
+- Distinguished odd/even weeks, irregular week masks and adjacent time ranges.
+
 ## 1.4.0
 
 - Rebuilt generic table scanning as a logical grid with rowspan and colspan support.

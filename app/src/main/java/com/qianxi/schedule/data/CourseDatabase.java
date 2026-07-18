@@ -86,6 +86,15 @@ public final class CourseDatabase extends SQLiteOpenHelper {
         return result;
     }
 
+    public synchronized List<Course> conflicts(Course candidate) {
+        List<Course> result = new ArrayList<>();
+        for (Course course : all()) {
+            if (course.id == candidate.id) continue;
+            if (candidate.conflictsWith(course)) result.add(course);
+        }
+        return result;
+    }
+
     public synchronized void importCourses(List<Course> courses, boolean replace) {
         Set<Course> known = replace ? new HashSet<>() : new HashSet<>(all());
         SQLiteDatabase db = getWritableDatabase();

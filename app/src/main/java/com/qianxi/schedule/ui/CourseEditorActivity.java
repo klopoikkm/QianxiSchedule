@@ -24,6 +24,8 @@ import com.qianxi.schedule.data.CourseDatabase;
 import com.qianxi.schedule.data.ScheduleTime;
 import com.qianxi.schedule.silence.AlarmScheduler;
 
+import java.util.List;
+
 public final class CourseEditorActivity extends Activity {
     public static final String EXTRA_COURSE_ID = "course_id";
     public static final String EXTRA_DAY = "day";
@@ -284,6 +286,35 @@ public final class CourseEditorActivity extends Activity {
         course.endWeek = lastWeek;
         course.parity = selectedParity;
         course.weekMask = weekPatternChanged ? 0L : originalWeekMask;
+        List<Course> conflicts = CourseDatabase.get(this).conflicts(course);
+        if (!conflicts.isEmpty()) {
+            showConflictWarning(conflicts);
+            return;
+        }
+        persistCourse();
+    }
+
+    private void showConflictWarning(List<Course> conflicts) {
+        StringBuilder message = new StringBuilder("该课程与以下安排时间重叠：\n\n");
+        int limit = Math.min(3, conflicts.size());
+        for (int i = 0; i < limit; i++) {
+            Course conflict = conflicts.get(i);
+            message.append("- ").append(conflict.name).append("  ")
+                    .append(ScheduleTime.formatMinutes(conflict.startMinute)).append("—")
+                    .append(ScheduleTime.formatMinutes(conflict.endMinute)).append('\n');
+        }
+        if (conflicts.size() > limit) {
+            message.append("另有 ").append(conflicts.size() - limit).append(" 条冲突\n");
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("发现课程冲突")
+                .setMessage(message.toString().trim())
+                .setNegativeButton("返回修改", null)
+                .setPositiveButton("仍然保存", (dialog, which) -> persistCourse())
+                .show();
+    }
+
+    private void persistCourse() {
         CourseDatabase.get(this).save(course);
         AlarmScheduler.reschedule(this);
         finish();

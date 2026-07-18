@@ -24,6 +24,17 @@ public final class Course {
         return parity == 0 || (parity == 1 && week % 2 == 1) || (parity == 2 && week % 2 == 0);
     }
 
+    public boolean conflictsWith(Course other) {
+        if (other == null || dayOfWeek != other.dayOfWeek
+                || endMinute <= other.startMinute || startMinute >= other.endMinute) {
+            return false;
+        }
+        for (int week = 1; week <= 60; week++) {
+            if (occursInWeek(week) && other.occursInWeek(week)) return true;
+        }
+        return false;
+    }
+
     public Course copy() {
         Course value = new Course();
         value.id = id;

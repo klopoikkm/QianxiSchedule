@@ -4,7 +4,9 @@ public final class ImportScript {
     private ImportScript() {}
 
     public static String forAdapter(String adapterId) {
-        return ImportAdapter.NEU.equals(adapterId) ? NEU_API : GENERIC_PAGE;
+        if (ImportAdapter.NEU.equals(adapterId)) return NEU_API;
+        if (ImportAdapter.NEUQ_EAMS.equals(adapterId)) return NEUQ_EAMS_API;
+        return GENERIC_PAGE;
     }
 
     private static final String GENERIC_PAGE = """
@@ -208,6 +210,232 @@ public final class ImportScript {
             window.__qianxiImportError = String(error && error.message ? error.message : error);
             window.__qianxiImportState = 'error';
           }
+        })();
+        """;
+
+    private static final String NEUQ_EAMS_API = """
+        (function () {
+          window.__qianxiImportState = 'loading';
+          window.__qianxiImportPayload = null;
+          window.__qianxiImportError = '';
+
+          const output = [];
+          const seen = new Set();
+          let scannedTables = 0;
+
+          function clean(value) {
+            return String(value || '').replace(/\\u00a0/g, ' ').replace(/[ \\t]+/g, ' ')
+              .replace(/\\n[ \\t]+/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
+          }
+          async function fetchText(url, options) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 15000);
+            try {
+              const response = await fetch(url, Object.assign({
+                credentials: 'include', signal: controller.signal,
+                headers: {'X-Requested-With': 'XMLHttpRequest'}
+              }, options || {}));
+              if (!response.ok) throw new Error('EAMS 请求失败（HTTP ' + response.status + '）');
+              return {text: await response.text(), url: response.url};
+            } finally {
+              clearTimeout(timer);
+            }
+          }
+          function isLoginPage(result) {
+            return /authserver\\/login|name=["']username["']|统一身份认证/i.test(
+              (result.url || '') + ' ' + (result.text || ''));
+          }
+          function documentOf(html) {
+            return new DOMParser().parseFromString(html, 'text/html');
+          }
+          function namedValue(doc, name) {
+            const element = doc.querySelector('[name="' + name + '"]');
+            if (!element) return '';
+            if (element.tagName === 'SELECT') {
+              const selected = element.querySelector('option:checked,option[selected]');
+              return clean((selected && selected.value) || element.value || '');
+            }
+            return clean(element.value || element.getAttribute('value') || '');
+          }
+          function firstNumber(html, patterns) {
+            for (const pattern of patterns) {
+              const match = html.match(pattern);
+              if (match) return match[1];
+            }
+            return '';
+          }
+          function discoverContext(html) {
+            const doc = documentOf(html);
+            const ids = namedValue(doc, 'ids') || namedValue(doc, 'student.id') ||
+              firstNumber(html, [
+                /name=["']ids["'][^>]*value=["'](\\d+)/i,
+                /["']ids["']\\s*,\\s*["']?(\\d+)/i,
+                /(?:studentId|stdId|ids)\\s*[:=]\\s*["']?(\\d+)/i
+              ]);
+            const semester = namedValue(doc, 'semester.id') ||
+              firstNumber(html, [
+                /name=["']semester\\.id["'][^>]*value=["'](\\d+)/i,
+                /["']semester\\.id["']\\s*,\\s*["']?(\\d+)/i,
+                /semester\\.id\\s*[:=]\\s*["']?(\\d+)/i
+              ]);
+            return {ids, semester};
+          }
+          function nodeText(node) {
+            return clean(node.innerText || node.textContent ||
+              (node.getAttribute && (node.getAttribute('title') || node.getAttribute('aria-label'))) || '');
+          }
+          function dayFromHeader(value) {
+            const match = clean(value).replace(/\\s+/g, '').match(/^(?:星期|周)?([一二三四五六日天])$/);
+            if (!match) return 0;
+            if (match[1] === '日' || match[1] === '天') return 7;
+            return '一二三四五六'.indexOf(match[1]) + 1;
+          }
+          function sectionFrom(value, fallback) {
+            const match = clean(value).match(/(?:第)?(\\d{1,2})(?:\\s*[-~至—]\\s*\\d{1,2})?\\s*节/);
+            return match ? Number(match[1]) : fallback;
+          }
+          function add(day, section, endSection, node) {
+            day = Number(day); section = Number(section); endSection = Number(endSection || section);
+            const text = nodeText(node);
+            if (!(day >= 1 && day <= 7) || !(section >= 1 && section <= 30)
+                || text.length < 2 || /^(无|暂无|--|-)$/.test(text)) return;
+            const key = [day, section, endSection, text].join('|');
+            if (seen.has(key)) return;
+            seen.add(key);
+            output.push({day, section, endSection: Math.max(section, endSection), text,
+              title: clean(node.getAttribute && (node.getAttribute('title') || ''))});
+          }
+          function addCell(day, section, cell) {
+            const endSection = section + Math.max(1, Number(cell.rowSpan || 1)) - 1;
+            const blocks = Array.from(cell.querySelectorAll(
+              ':scope > .kbcontent,:scope > .course,:scope > .activity,' +
+              ':scope > [class*="course"],:scope > [class*="activity"]'))
+              .filter(node => nodeText(node).length > 1);
+            if (blocks.length) blocks.forEach(node => add(day, section, endSection, node));
+            else add(day, section, endSection, cell);
+          }
+          function scanTable(table) {
+            scannedTables++;
+            const rows = Array.from(table.rows || []);
+            const grid = [];
+            rows.forEach((row, rowIndex) => {
+              if (!grid[rowIndex]) grid[rowIndex] = [];
+              let column = 0;
+              for (const cell of Array.from(row.cells || [])) {
+                while (grid[rowIndex][column]) column++;
+                const rowSpan = Math.max(1, Number(cell.rowSpan || 1));
+                const colSpan = Math.max(1, Number(cell.colSpan || 1));
+                for (let r = 0; r < rowSpan; r++) {
+                  if (!grid[rowIndex + r]) grid[rowIndex + r] = [];
+                  for (let c = 0; c < colSpan; c++) {
+                    grid[rowIndex + r][column + c] = {cell, originRow: rowIndex};
+                  }
+                }
+                column += colSpan;
+              }
+            });
+            const width = grid.reduce((max, row) => Math.max(max, row.length), 0);
+            if (width < 7) return;
+            const columns = {};
+            for (let row = 0; row < Math.min(5, grid.length); row++) {
+              for (let column = 0; column < grid[row].length; column++) {
+                const entry = grid[row][column];
+                const day = entry ? dayFromHeader(nodeText(entry.cell)) : 0;
+                if (day && columns[day] === undefined) columns[day] = column;
+              }
+            }
+            if (Object.keys(columns).length !== 7) {
+              const start = Math.max(0, width - 7);
+              for (let day = 1; day <= 7; day++) columns[day] = start + day - 1;
+            }
+            grid.forEach((row, rowIndex) => {
+              const labels = row.slice(0, Math.min(4, row.length)).filter(Boolean)
+                .map(entry => nodeText(entry.cell)).join(' ');
+              const section = sectionFrom(labels, Math.max(1, rowIndex));
+              for (let day = 1; day <= 7; day++) {
+                const entry = row[columns[day]];
+                if (entry && entry.originRow === rowIndex) addCell(day, section, entry.cell);
+              }
+            });
+          }
+          function scanDocument(doc) {
+            for (const table of doc.querySelectorAll('table')) scanTable(table);
+          }
+          function renderAndScan(html) {
+            return new Promise(resolve => {
+              const frame = document.createElement('iframe');
+              frame.style.display = 'none';
+              let finished = false;
+              const done = () => {
+                if (finished) return;
+                finished = true;
+                try { if (frame.contentDocument) scanDocument(frame.contentDocument); } catch (_) {}
+                frame.remove();
+                resolve();
+              };
+              frame.onload = () => setTimeout(done, 1200);
+              const base = '<base href="' + location.origin + '/eams/">';
+              frame.srcdoc = /<head[^>]*>/i.test(html)
+                ? html.replace(/<head[^>]*>/i, match => match + base) : base + html;
+              document.body.appendChild(frame);
+              setTimeout(done, 5000);
+            });
+          }
+
+          (async function () {
+            try {
+              if (!/^jwxt\\.neuq\\.edu\\.cn$/i.test(location.hostname)) {
+                throw new Error('东北大学秦皇岛适配器只能在 jwxt.neuq.edu.cn 内运行');
+              }
+              const currentHtml = document.documentElement ? document.documentElement.outerHTML : '';
+              const landing = await fetchText('/eams/courseTableForStd.action');
+              if (isLoginPage(landing)) throw new Error('登录状态已失效，请重新登录统一身份认证');
+              let context = discoverContext(landing.text);
+              if (!context.ids || !context.semester) {
+                const current = discoverContext(currentHtml);
+                context = {ids: context.ids || current.ids, semester: context.semester || current.semester};
+              }
+              if (!context.ids) {
+                throw new Error('未获取到学生课表 ID，请先在教务菜单中打开一次“我的课表”');
+              }
+              if (!context.semester) {
+                throw new Error('未获取到当前学期，请在“我的课表”页面选择学期后重试');
+              }
+
+              const form = new URLSearchParams();
+              form.append('ignoreHead', '1');
+              form.append('showPrintAndExport', '1');
+              form.append('setting.kind', 'std');
+              form.append('ids', context.ids);
+              form.append('semester.id', context.semester);
+              form.append('startWeek', '1');
+              const result = await fetchText('/eams/courseTableForStd!courseTable.action', {
+                method: 'POST', body: form,
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                  'X-Requested-With': 'XMLHttpRequest'
+                }
+              });
+              if (isLoginPage(result)) throw new Error('登录状态已失效，请重新登录统一身份认证');
+              scanDocument(documentOf(result.text));
+              if (!output.length) await renderAndScan(result.text);
+
+              window.__qianxiImportPayload = {
+                adapter: 'neuq-eams',
+                source: 'neuq-eams',
+                sourceUrl: location.origin + '/eams/courseTableForStd.action',
+                pageTitle: '东北大学秦皇岛个人课表',
+                term: context.semester,
+                campus: '东北大学秦皇岛分校',
+                diagnostics: {frames: 0, tables: scannedTables, candidates: output.length},
+                items: output
+              };
+              window.__qianxiImportState = 'done';
+            } catch (error) {
+              window.__qianxiImportError = String(error && error.message ? error.message : error);
+              window.__qianxiImportState = 'error';
+            }
+          })();
         })();
         """;
 
