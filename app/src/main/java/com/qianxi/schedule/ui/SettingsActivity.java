@@ -1,6 +1,7 @@
 package com.qianxi.schedule.ui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.DatePickerDialog;
 import android.content.Intent;
 import android.graphics.Color;
@@ -20,18 +21,28 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.qianxi.schedule.data.AppSettings;
+import com.qianxi.schedule.data.BackupManager;
+import com.qianxi.schedule.data.Course;
+import com.qianxi.schedule.data.CourseDatabase;
 import com.qianxi.schedule.silence.AlarmScheduler;
 import com.qianxi.schedule.silence.SilenceState;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 
 public final class SettingsActivity extends Activity {
+    private static final int REQUEST_EXPORT_BACKUP = 41;
+    private static final int REQUEST_IMPORT_BACKUP = 42;
     private AppSettings settings;
     private Switch autoSilent;
     private TextView permissionStatus;
     private TextView semesterValue;
+    private BackupManager.Backup pendingBackup;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -111,8 +122,22 @@ public final class SettingsActivity extends Activity {
         root.addView(cookies);
         root.addView(Ui.divider(this));
 
+        root.addView(Ui.sectionTitle(this, "数据迁移"));
+        LinearLayout backupActions = new LinearLayout(this);
+        backupActions.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 8), Ui.dp(this, 10));
+        Button export = Ui.textButton(this, "导出备份");
+        export.setContentDescription("导出本地课表备份");
+        export.setOnClickListener(v -> exportBackup());
+        Button importBackup = Ui.textButton(this, "导入备份");
+        importBackup.setContentDescription("导入本地课表备份");
+        importBackup.setOnClickListener(v -> importBackup());
+        backupActions.addView(export, new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1));
+        backupActions.addView(importBackup, new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1));
+        root.addView(backupActions);
+        root.addView(Ui.divider(this));
+
         root.addView(Ui.sectionTitle(this, "关于"));
-        LinearLayout about = labels("潜溪课表 1.1.0", "课程数据与教务页面只在本机处理 · MIT License");
+        LinearLayout about = labels("潜溪课表 1.2.0", "课程数据与教务页面只在本机处理 · MIT License");
         about.setPadding(Ui.dp(this, 20), 0, Ui.dp(this, 20), 0);
         root.addView(about, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 70)));
@@ -176,6 +201,94 @@ public final class SettingsActivity extends Activity {
             updateStatus();
             AlarmScheduler.reschedule(this);
         }, date.getYear(), date.getMonthValue() - 1, date.getDayOfMonth()).show();
+    }
+
+    private void exportBackup() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.setType("application/json");
+            intent.putExtra(Intent.EXTRA_TITLE, "qianxi-schedule-backup.json");
+            startActivityForResult(intent, REQUEST_EXPORT_BACKUP);
+        } catch (Exception exception) {
+            Toast.makeText(this, "系统不支持导出文件", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void importBackup() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.setType("application/json");
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            startActivityForResult(intent, REQUEST_IMPORT_BACKUP);
+        } catch (Exception exception) {
+            Toast.makeText(this, "系统不支持导入文件", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (requestCode == REQUEST_EXPORT_BACKUP) writeBackup(data.getData());
+        else if (requestCode == REQUEST_IMPORT_BACKUP) readBackup(data.getData());
+    }
+
+    private void writeBackup(Uri uri) {
+        try (OutputStream output = getContentResolver().openOutputStream(uri)) {
+            if (output == null) throw new java.io.IOException("无法打开目标文件");
+            String json = BackupManager.encode(settings, CourseDatabase.get(this).all());
+            output.write(json.getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            Toast.makeText(this, "备份已导出", Toast.LENGTH_SHORT).show();
+        } catch (Exception exception) {
+            Toast.makeText(this, "导出失败：" + exception.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void readBackup(Uri uri) {
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            if (input == null) throw new java.io.IOException("无法读取备份文件");
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            int total = 0;
+            int count;
+            while ((count = input.read(chunk)) != -1) {
+                total += count;
+                if (total > 2 * 1024 * 1024) throw new java.io.IOException("备份文件过大");
+                buffer.write(chunk, 0, count);
+            }
+            pendingBackup = BackupManager.decode(buffer.toString(StandardCharsets.UTF_8.name()));
+            String message = String.format(Locale.CHINA, "包含 %d 条课程和 %d 个教务入口。选择替换会同时恢复学期和静音设置。",
+                    pendingBackup.courses.size(), pendingBackup.profiles.size());
+            new AlertDialog.Builder(this)
+                    .setTitle("导入本地备份")
+                    .setMessage(message)
+                    .setNegativeButton("取消", null)
+                    .setNeutralButton("合并课程", (dialog, which) -> applyBackup(false))
+                    .setPositiveButton("替换全部", (dialog, which) -> applyBackup(true))
+                    .show();
+        } catch (Exception exception) {
+            pendingBackup = null;
+            Toast.makeText(this, "备份无效：" + exception.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void applyBackup(boolean replace) {
+        if (pendingBackup == null) return;
+        BackupManager.Backup backup = pendingBackup;
+        pendingBackup = null;
+        CourseDatabase.get(this).importCourses(backup.courses, replace);
+        if (replace) {
+            settings.setSemesterStart(backup.semesterStart);
+            settings.setAutoSilentEnabled(backup.autoSilent);
+            settings.setSchoolUrl(backup.schoolUrl);
+            settings.setSelectedAdapterId(backup.adapterId);
+            settings.replaceCustomSchoolProfiles(backup.profiles);
+            settings.setSelectedSchoolProfileId(backup.selectedProfileId);
+        }
+        AlarmScheduler.reschedule(this);
+        updateStatus();
+        Toast.makeText(this, replace ? "备份已恢复" : "课程已合并", Toast.LENGTH_SHORT).show();
     }
 
     @Override

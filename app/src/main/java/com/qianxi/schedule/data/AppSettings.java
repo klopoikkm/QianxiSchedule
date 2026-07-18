@@ -113,6 +113,17 @@ public final class AppSettings {
         }
     }
 
+    public void replaceCustomSchoolProfiles(List<SchoolProfile> profiles) {
+        List<SchoolProfile> valid = new ArrayList<>();
+        for (SchoolProfile profile : profiles) {
+            if (profile != null && profile.custom && !profile.url.trim().isEmpty()) {
+                valid.add(profile);
+                if (valid.size() == 20) break;
+            }
+        }
+        writeProfiles(valid);
+    }
+
     private void writeProfiles(List<SchoolProfile> profiles) {
         JSONArray array = new JSONArray();
         for (SchoolProfile profile : profiles) {

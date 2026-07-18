@@ -32,6 +32,8 @@ public final class MainActivity extends Activity implements ScheduleView.Listene
     private TextView weekLabel;
     private TextView silentStatus;
     private TextView emptyState;
+    private TextView nextSummary;
+    private Course summaryCourse;
     private int selectedWeek;
 
     @Override
@@ -91,6 +93,18 @@ public final class MainActivity extends Activity implements ScheduleView.Listene
         next.setOnClickListener(v -> changeWeek(1));
         weekBar.addView(next, new LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 44)));
         root.addView(weekBar);
+
+        nextSummary = Ui.text(this, "", 13, Ui.INK);
+        nextSummary.setPadding(Ui.dp(this, 14), Ui.dp(this, 8), Ui.dp(this, 14), Ui.dp(this, 8));
+        nextSummary.setMaxLines(2);
+        nextSummary.setBackground(Ui.rounded(Color.WHITE, 8, this));
+        nextSummary.setOnClickListener(v -> {
+            if (summaryCourse != null) onCourseClick(summaryCourse);
+        });
+        LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 54));
+        summaryParams.setMargins(Ui.dp(this, 12), 0, Ui.dp(this, 12), Ui.dp(this, 8));
+        root.addView(nextSummary, summaryParams);
         root.addView(Ui.divider(this));
 
         FrameLayout scheduleContainer = new FrameLayout(this);
@@ -161,6 +175,65 @@ public final class MainActivity extends Activity implements ScheduleView.Listene
         silentStatus.setTextColor(settings.autoSilentEnabled() ? Ui.PRIMARY : Ui.MUTED);
         scheduleView.setData(courses, start);
         emptyState.setVisibility(courses.isEmpty() ? View.VISIBLE : View.GONE);
+        updateSummary(courses, start);
+    }
+
+    private void updateSummary(List<Course> courses, LocalDate weekStart) {
+        summaryCourse = null;
+        if (courses.isEmpty()) {
+            nextSummary.setText("本周暂无课程 · 点击空白时段即可添加");
+            nextSummary.setTextColor(Ui.MUTED);
+            nextSummary.setClickable(false);
+            return;
+        }
+
+        LocalDate today = LocalDate.now();
+        int currentWeek = ScheduleTime.weekOf(settings.semesterStart(), today);
+        int now = java.time.LocalTime.now().getHour() * 60 + java.time.LocalTime.now().getMinute();
+        Course ongoing = null;
+        Course next = null;
+        if (selectedWeek == currentWeek && !today.isBefore(weekStart) && !today.isAfter(weekStart.plusDays(6))) {
+            int todayIndex = today.getDayOfWeek().getValue();
+            for (Course course : courses) {
+                if (course.dayOfWeek != todayIndex) continue;
+                if (course.startMinute <= now && now < course.endMinute) {
+                    ongoing = course;
+                    break;
+                }
+                if (course.startMinute > now && next == null) next = course;
+            }
+        }
+        if (ongoing != null) {
+            summaryCourse = ongoing;
+            nextSummary.setText(String.format(Locale.CHINA, "正在上课 · 周%s %s\n%s%s",
+                    chineseDay(ongoing.dayOfWeek), ScheduleTime.formatMinutes(ongoing.startMinute),
+                    ongoing.name, ongoing.location.isEmpty() ? "" : " · " + ongoing.location));
+            nextSummary.setTextColor(Ui.PRIMARY);
+        } else {
+            if (next == null && selectedWeek == currentWeek) {
+                int todayIndex = today.getDayOfWeek().getValue();
+                for (Course course : courses) {
+                    if (course.dayOfWeek > todayIndex) {
+                        next = course;
+                        break;
+                    }
+                }
+            }
+            if (next == null) next = courses.get(0);
+            summaryCourse = next;
+            LocalDate date = weekStart.plusDays(next.dayOfWeek - 1L);
+            nextSummary.setText(String.format(Locale.CHINA, "下一节 · 周%s %s %s\n%s%s",
+                    chineseDay(next.dayOfWeek), date.getMonthValue() + "." + date.getDayOfMonth(),
+                    ScheduleTime.formatMinutes(next.startMinute), next.name,
+                    next.location.isEmpty() ? "" : " · " + next.location));
+            nextSummary.setTextColor(Ui.INK);
+        }
+        nextSummary.setClickable(true);
+    }
+
+    private static String chineseDay(int day) {
+        return new String[]{"一", "二", "三", "四", "五", "六", "日"}
+                [Math.max(1, Math.min(7, day)) - 1];
     }
 
     @Override

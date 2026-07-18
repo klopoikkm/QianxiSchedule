@@ -15,6 +15,7 @@ public final class ImportScript {
           try {
             const output = [];
             const seen = new Set();
+            let structuredNodes = 0;
             const docs = [document];
             for (const frame of document.querySelectorAll('iframe')) {
               try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (_) {}
@@ -28,16 +29,36 @@ public final class ImportScript {
               return clean(node.innerText || node.textContent || node.getAttribute('title') ||
                 node.getAttribute('aria-label') || '');
             }
-            function add(day, section, endSection, node) {
-              day = Number(day); section = Number(section); endSection = Number(endSection || section);
-              if (!(day >= 1 && day <= 7) || !(section >= 1 && section <= 30)) return;
-              const text = nodeText(node);
-              if (!text || text.length < 2 || /^(无|暂无|--|-)$/.test(text)) return;
+            function dayNumber(value) {
+              const numeric = Number(value);
+              if (numeric >= 1 && numeric <= 7) return numeric;
+              const match = clean(value).match(/[一二三四五六日天]/);
+              if (!match) return 0;
+              if (match[0] === '日' || match[0] === '天') return 7;
+              return '一二三四五六'.indexOf(match[0]) + 1;
+            }
+            function sectionNumber(value) {
+              const numeric = Number(value);
+              if (numeric >= 1 && numeric <= 30) return numeric;
+              const match = clean(value).match(/\\d{1,2}/);
+              return match ? Number(match[0]) : 0;
+            }
+            function addText(day, section, endSection, text, title) {
+              day = dayNumber(day); section = sectionNumber(section);
+              endSection = sectionNumber(endSection || section) || section;
+              text = clean(text);
+              if (!(day >= 1 && day <= 7) || !(section >= 1 && section <= 30)
+                  || !text || text.length < 2 || /^(无|暂无|--|-)$/.test(text)) return;
               const key = day + '|' + section + '|' + endSection + '|' + text;
               if (seen.has(key)) return;
               seen.add(key);
               output.push({ day, section, endSection: Math.max(section, endSection), text,
-                title: clean(node.getAttribute && (node.getAttribute('title') || '')) });
+                title: clean(title || '') });
+            }
+            function add(day, section, endSection, node) {
+              const text = nodeText(node);
+              addText(day, section, endSection, text,
+                node && node.getAttribute ? node.getAttribute('title') : '');
             }
             function addCell(day, section, cell) {
               const endSection = Number(section) + Math.max(1, Number(cell.rowSpan || 1)) - 1;
@@ -52,6 +73,43 @@ public final class ImportScript {
               const match = clean(value).match(/(?:第)?(\\d{1,2})(?:\\s*[-~至—]\\s*\\d{1,2})?\\s*节/);
               return match ? Number(match[1]) : fallback;
             }
+            function field(value, names) {
+              if (!value || typeof value !== 'object') return '';
+              for (const name of names) {
+                if (value[name] !== undefined && value[name] !== null && String(value[name]).trim()) {
+                  return value[name];
+                }
+              }
+              return '';
+            }
+            function addStructured(value) {
+              if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+              const day = field(value, ['dayOfWeek', 'weekday', 'weekDay', 'day', 'xq', 'week_day']);
+              const section = field(value, ['beginSection', 'startSection', 'section', 'period', 'jc', 'startJc']);
+              if (!day || !section) return;
+              const name = field(value, ['courseName', 'course_name', 'name', 'courseTitle', 'title']);
+              const teacher = field(value, ['teacherName', 'teacher', 'teachers', 'instructor']);
+              const location = field(value, ['roomName', 'location', 'classroom', 'room']);
+              const weeks = field(value, ['weekDescription', 'weeks', 'weekText', 'week']);
+              const text = [name, teacher, location, weeks].filter(Boolean).join('\\n');
+              addText(day, section, field(value, ['endSection', 'finishSection', 'endJc', 'endPeriod']) || section,
+                text || value.text || value.content || '', field(value, ['title', 'courseName']));
+            }
+            function scanStructured(value, depth) {
+              if (!value || depth > 6) return;
+              if (++structuredNodes > 5000) return;
+              if (Array.isArray(value)) {
+                for (const item of value) scanStructured(item, depth + 1);
+                return;
+              }
+              if (typeof value !== 'object') return;
+              addStructured(value);
+              for (const key of Object.keys(value)) {
+                if (key !== 'html' && key !== 'style' && key !== 'children') {
+                  scanStructured(value[key], depth + 1);
+                }
+              }
+            }
             function scan(doc) {
               for (const cell of doc.querySelectorAll('td[id],div[id]')) {
                 const id = cell.id || '';
@@ -59,12 +117,20 @@ public final class ImportScript {
                 if (match) addCell(Number(match[1]), Number(match[2]), cell);
                 match = id.match(/^(\\d{1,2})[-_](\\d)$/);
                 if (match && Number(match[1]) > 7) addCell(Number(match[2]), Number(match[1]), cell);
+                match = id.match(/(?:day|d|xq)[-_]?([1-7])[^0-9]+(?:section|s|jc)?[_-]?(\\d{1,2})/i);
+                if (match) addCell(Number(match[1]), Number(match[2]), cell);
               }
-              for (const cell of doc.querySelectorAll('[data-day],[data-weekday],[data-xq]')) {
-                const day = cell.dataset.day || cell.dataset.weekday || cell.dataset.xq;
+              for (const cell of doc.querySelectorAll(
+                  '[data-day],[data-weekday],[data-xq],[data-day-of-week],[data-course-day]')) {
+                const day = cell.dataset.day || cell.dataset.weekday || cell.dataset.xq ||
+                  cell.dataset.dayOfWeek || cell.dataset.courseDay;
                 const section = cell.dataset.section || cell.dataset.period || cell.dataset.jc ||
+                  cell.dataset.startSection || cell.dataset.periodIndex ||
                   sectionFrom(nodeText(cell), 1);
                 addCell(day, section, cell);
+              }
+              for (const script of doc.querySelectorAll('script[type="application/json"],script[data-course-data]')) {
+                try { scanStructured(JSON.parse(script.textContent || ''), 0); } catch (_) {}
               }
               for (const table of doc.querySelectorAll('table')) {
                 const rows = Array.from(table.rows || []);

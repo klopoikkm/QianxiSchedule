@@ -174,7 +174,7 @@ public final class ImportActivity extends Activity {
         webView.getSettings().setLoadWithOverviewMode(true);
         webView.getSettings().setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         webView.getSettings().setUserAgentString(
-                webView.getSettings().getUserAgentString() + " QianxiSchedule/1.1");
+                webView.getSettings().getUserAgentString() + " QianxiSchedule/1.2");
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         webView.setWebChromeClient(new WebChromeClient() {
