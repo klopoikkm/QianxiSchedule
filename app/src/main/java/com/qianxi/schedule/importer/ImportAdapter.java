@@ -82,11 +82,20 @@ public final class ImportAdapter {
 
     public static String detect(String url) {
         try {
-            String host = URI.create(url).getHost();
+            URI uri = URI.create(url);
+            String host = uri.getHost();
             host = host == null ? "" : host.toLowerCase(java.util.Locale.ROOT);
+            String path = uri.getPath();
+            path = path == null ? "" : path.toLowerCase(java.util.Locale.ROOT);
             if (host.equals("jwxt.neu.edu.cn") || host.endsWith(".jwxt.neu.edu.cn")) return NEU;
             if (host.equals("jwxt.neuq.edu.cn") || host.endsWith(".jwxt.neuq.edu.cn")) {
                 return NEUQ_EAMS;
+            }
+            if (path.equals("/eams") || path.startsWith("/eams/") || path.contains("/eams/")) {
+                return NEUQ_EAMS;
+            }
+            if (path.equals("/jwapp") || path.startsWith("/jwapp/") || path.contains("/jwapp/")) {
+                return NEU;
             }
         } catch (IllegalArgumentException ignored) {
         }

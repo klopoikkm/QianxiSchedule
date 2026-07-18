@@ -4,8 +4,8 @@ public final class ImportScript {
     private ImportScript() {}
 
     public static String forAdapter(String adapterId) {
-        if (ImportAdapter.NEU.equals(adapterId)) return NEU_API;
-        if (ImportAdapter.NEUQ_EAMS.equals(adapterId)) return NEUQ_EAMS_API;
+        // Login and page selection remain under the user's control. Every adapter scans only
+        // the currently visible timetable, avoiding fragile background API assumptions.
         return GENERIC_PAGE;
     }
 

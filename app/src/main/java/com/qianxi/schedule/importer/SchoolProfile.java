@@ -5,7 +5,6 @@ import org.json.JSONObject;
 
 public final class SchoolProfile {
     public static final String CUSTOM_ENTRY_ID = "custom-entry";
-    public static final String NEU_ID = "builtin-neu";
 
     public final String id;
     public final String name;
@@ -22,12 +21,7 @@ public final class SchoolProfile {
     }
 
     public static SchoolProfile customEntry() {
-        return new SchoolProfile(CUSTOM_ENTRY_ID, "自定义教务网址", "", ImportAdapter.AUTO, false);
-    }
-
-    public static SchoolProfile northeasternUniversity() {
-        return new SchoolProfile(NEU_ID, "东北大学教务",
-                "https://jwxt.neu.edu.cn/", ImportAdapter.NEU, false);
+        return new SchoolProfile(CUSTOM_ENTRY_ID, "输入或选择教务网址", "", ImportAdapter.AUTO, false);
     }
 
     public JSONObject toJson() throws JSONException {
