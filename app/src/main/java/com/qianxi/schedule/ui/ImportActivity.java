@@ -58,6 +58,8 @@ import java.util.Locale;
 
 public final class ImportActivity extends Activity {
     private static final int MAX_POLL_ATTEMPTS = 160;
+    private static final String DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<SchoolProfile> profiles = new ArrayList<>();
     private final List<WebView> browserStack = new ArrayList<>();
@@ -190,6 +192,7 @@ public final class ImportActivity extends Activity {
 
         webContainer = new FrameLayout(this);
         webView = createWebView();
+        webView.clearCache(true);
         browserStack.add(webView);
         webContainer.addView(webView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -230,8 +233,10 @@ public final class ImportActivity extends Activity {
         webSettings.setLoadsImagesAutomatically(true);
         webSettings.setBlockNetworkLoads(false);
         webSettings.setBlockNetworkImage(false);
+        webSettings.setTextZoom(100);
         webSettings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        webSettings.setUserAgentString(DESKTOP_USER_AGENT);
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
@@ -494,12 +499,7 @@ public final class ImportActivity extends Activity {
 
     private void applyCompatibility(WebView view, String url) {
         if (view == null) return;
-        boolean legacyEams = isLegacyEamsUrl(url);
-        boolean cleartext = url != null && url.toLowerCase(Locale.ROOT).startsWith("http://");
-        WebSettings webSettings = view.getSettings();
-        webSettings.setMixedContentMode(legacyEams || cleartext
-                ? WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                : WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        view.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
     }
 
     private String webErrorMessage(int errorCode, CharSequence description) {

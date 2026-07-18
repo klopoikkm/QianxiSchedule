@@ -91,6 +91,9 @@ public final class ImportAdapter {
             if (host.equals("jwxt.neuq.edu.cn") || host.endsWith(".jwxt.neuq.edu.cn")) {
                 return NEUQ_EAMS;
             }
+            if (host.equals("vpn.neuq.edu.cn") || host.endsWith(".vpn.neuq.edu.cn")) {
+                return NEUQ_EAMS;
+            }
             if (path.equals("/eams") || path.startsWith("/eams/") || path.contains("/eams/")) {
                 return NEUQ_EAMS;
             }

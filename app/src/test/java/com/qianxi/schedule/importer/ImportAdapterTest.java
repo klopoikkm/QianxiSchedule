@@ -51,6 +51,12 @@ public final class ImportAdapterTest {
     }
 
     @Test
+    public void detectsNeuqWebVpnAsNortheastUniversity() {
+        assertEquals(ImportAdapter.NEUQ_EAMS,
+                ImportAdapter.detect("https://vpn.neuq.edu.cn/http/77726476706e69737468656265737421"));
+    }
+
+    @Test
     public void specialAdaptersDoNotRejectCustomHosts() {
         assertFalse(ImportScript.forAdapter(ImportAdapter.NEU).contains("jwxt\\.neu\\.edu\\.cn$"));
         assertFalse(ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS)
