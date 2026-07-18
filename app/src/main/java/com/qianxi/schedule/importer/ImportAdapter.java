@@ -8,6 +8,7 @@ import java.util.List;
 public final class ImportAdapter {
     public static final String AUTO = "auto";
     public static final String NEU = "neu";
+    public static final String NEUQ_EAMS = "neuq-eams";
     public static final String ZHENGFANG = "zhengfang";
     public static final String QIANGZHI = "qiangzhi";
     public static final String KINGOSOFT = "kingosoft";
@@ -31,6 +32,7 @@ public final class ImportAdapter {
     private static final List<Definition> DEFINITIONS = Collections.unmodifiableList(Arrays.asList(
             new Definition(AUTO, "自动识别"),
             new Definition(NEU, "东北大学新版教务"),
+            new Definition(NEUQ_EAMS, "东北大学秦皇岛（EAMS）"),
             new Definition(ZHENGFANG, "正方教务"),
             new Definition(QIANGZHI, "强智教务"),
             new Definition(KINGOSOFT, "青果教务"),
@@ -75,6 +77,9 @@ public final class ImportAdapter {
             String host = URI.create(url).getHost();
             host = host == null ? "" : host.toLowerCase(java.util.Locale.ROOT);
             if (host.equals("jwxt.neu.edu.cn") || host.endsWith(".jwxt.neu.edu.cn")) return NEU;
+            if (host.equals("jwxt.neuq.edu.cn") || host.endsWith(".jwxt.neuq.edu.cn")) {
+                return NEUQ_EAMS;
+            }
         } catch (IllegalArgumentException ignored) {
         }
         return GENERIC;

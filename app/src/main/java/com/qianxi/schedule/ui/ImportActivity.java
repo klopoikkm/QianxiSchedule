@@ -45,7 +45,7 @@ import java.util.List;
 import java.util.Locale;
 
 public final class ImportActivity extends Activity {
-    private static final int MAX_POLL_ATTEMPTS = 80;
+    private static final int MAX_POLL_ATTEMPTS = 160;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<SchoolProfile> profiles = new ArrayList<>();
     private AppSettings settings;
@@ -174,7 +174,7 @@ public final class ImportActivity extends Activity {
         webView.getSettings().setLoadWithOverviewMode(true);
         webView.getSettings().setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         webView.getSettings().setUserAgentString(
-                webView.getSettings().getUserAgentString() + " QianxiSchedule/1.4");
+                webView.getSettings().getUserAgentString() + " QianxiSchedule/1.5");
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         webView.setWebChromeClient(new WebChromeClient() {
@@ -232,6 +232,7 @@ public final class ImportActivity extends Activity {
         profiles.clear();
         profiles.add(SchoolProfile.customEntry());
         profiles.add(SchoolProfile.northeasternUniversity());
+        profiles.add(SchoolProfile.northeasternUniversityQinhuangdao());
         profiles.addAll(settings.customSchoolProfiles());
         profileAdapter.notifyDataSetChanged();
         int selected = 0;
@@ -461,6 +462,11 @@ public final class ImportActivity extends Activity {
         if (outcome.skippedItems > 0) {
             preview.append("已忽略 ").append(outcome.skippedItems).append(" 条无效记录");
         }
+        int conflicts = countExistingConflicts(outcome.courses);
+        if (conflicts > 0) {
+            if (preview.length() > 0 && preview.charAt(preview.length() - 1) != '\n') preview.append('\n');
+            preview.append("与现有课表冲突 ").append(conflicts).append(" 条；选择替换可移除旧安排");
+        }
         new AlertDialog.Builder(this)
                 .setTitle(String.format(Locale.CHINA, "识别到 %d 条课程", outcome.courses.size()))
                 .setMessage(preview.toString().trim())
@@ -468,6 +474,15 @@ public final class ImportActivity extends Activity {
                 .setNeutralButton("合并", (dialog, which) -> commitImport(outcome.courses, false))
                 .setPositiveButton("替换现有课表", (dialog, which) -> commitImport(outcome.courses, true))
                 .show();
+    }
+
+    private int countExistingConflicts(List<Course> courses) {
+        int conflicts = 0;
+        CourseDatabase database = CourseDatabase.get(this);
+        for (Course course : courses) {
+            if (!database.conflicts(course).isEmpty()) conflicts++;
+        }
+        return conflicts;
     }
 
     private void commitImport(List<Course> courses, boolean replace) {
