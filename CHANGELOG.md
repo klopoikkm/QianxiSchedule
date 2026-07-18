@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0
+
+- Kept weekday and date headers fixed while the timetable body scrolls vertically.
+- Preserved seven-day phone layouts, today highlighting and body hit testing.
+
 ## 1.2.1
 
 - Made the settings screen vertically scrollable while keeping its toolbar fixed.

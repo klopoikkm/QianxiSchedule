@@ -28,6 +28,7 @@ import java.util.Locale;
 public final class MainActivity extends Activity implements ScheduleView.Listener {
     private AppSettings settings;
     private CourseDatabase database;
+    private ScheduleHeaderView scheduleHeader;
     private ScheduleView scheduleView;
     private TextView weekLabel;
     private TextView silentStatus;
@@ -108,14 +109,22 @@ public final class MainActivity extends Activity implements ScheduleView.Listene
         root.addView(Ui.divider(this));
 
         FrameLayout scheduleContainer = new FrameLayout(this);
+        LinearLayout scheduleColumn = new LinearLayout(this);
+        scheduleColumn.setOrientation(LinearLayout.VERTICAL);
+        scheduleHeader = new ScheduleHeaderView(this);
+        scheduleColumn.addView(scheduleHeader, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 48)));
+
         ScrollView vertical = new ScrollView(this);
         vertical.setFillViewport(false);
         vertical.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scheduleView = new ScheduleView(this);
         scheduleView.setListener(this);
         vertical.addView(scheduleView, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 760)));
-        scheduleContainer.addView(vertical, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 712)));
+        scheduleColumn.addView(vertical, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        scheduleContainer.addView(scheduleColumn, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         emptyState = Ui.text(this, "暂无课程，点击空白时段添加", 14, Ui.MUTED);
@@ -173,6 +182,7 @@ public final class MainActivity extends Activity implements ScheduleView.Listene
                 start.format(formatter), start.plusDays(6).format(formatter)));
         silentStatus.setText(settings.autoSilentEnabled() ? "静音 已开" : "静音 未开");
         silentStatus.setTextColor(settings.autoSilentEnabled() ? Ui.PRIMARY : Ui.MUTED);
+        scheduleHeader.setWeekStart(start);
         scheduleView.setData(courses, start);
         emptyState.setVisibility(courses.isEmpty() ? View.VISIBLE : View.GONE);
         updateSummary(courses, start);
