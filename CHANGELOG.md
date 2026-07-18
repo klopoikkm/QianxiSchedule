@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.0
+
+- Fixed incomplete NEUQ WebVPN/EAMS rendering caused by mobile user-agent responses.
+- Applied one stable desktop Chrome user agent before any page navigation.
+- Allowed legacy HTTP styles and scripts inside HTTPS WebVPN pages.
+- Cleared stale WebView resources when opening the import browser.
+- Detected `vpn.neuq.edu.cn` as Northeast University automatically.
+
 ## 1.7.0
 
 - Removed fixed school URLs so any academic-system address can be entered or saved.

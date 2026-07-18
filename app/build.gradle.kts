@@ -19,8 +19,8 @@ android {
         applicationId = "com.qianxi.schedule"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.7.0"
+        versionCode = 10
+        versionName = "1.8.0"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }
