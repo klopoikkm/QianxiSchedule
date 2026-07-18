@@ -110,6 +110,56 @@ public final class ImportScript {
                 }
               }
             }
+            function headerDay(value) {
+              const compact = clean(value).replace(/\\s+/g, '');
+              let match = compact.match(/^(?:星期|周)([一二三四五六日天])/);
+              if (!match) match = compact.match(/^([一二三四五六日天])$/);
+              return match ? dayNumber(match[1]) : 0;
+            }
+            function scanTable(table) {
+              const rows = Array.from(table.rows || []);
+              const grid = [];
+              rows.forEach((row, rowIndex) => {
+                if (!grid[rowIndex]) grid[rowIndex] = [];
+                let column = 0;
+                for (const cell of Array.from(row.cells || [])) {
+                  while (grid[rowIndex][column]) column++;
+                  const rowSpan = Math.max(1, Number(cell.rowSpan || 1));
+                  const colSpan = Math.max(1, Number(cell.colSpan || 1));
+                  for (let rowOffset = 0; rowOffset < rowSpan; rowOffset++) {
+                    const targetRow = rowIndex + rowOffset;
+                    if (!grid[targetRow]) grid[targetRow] = [];
+                    for (let colOffset = 0; colOffset < colSpan; colOffset++) {
+                      grid[targetRow][column + colOffset] = {cell, originRow: rowIndex};
+                    }
+                  }
+                  column += colSpan;
+                }
+              });
+              const maxColumns = grid.reduce((max, row) => Math.max(max, row.length), 0);
+              if (maxColumns < 7) return;
+              const dayColumns = {};
+              for (let row = 0; row < Math.min(4, grid.length); row++) {
+                for (let column = 0; column < grid[row].length; column++) {
+                  const entry = grid[row][column];
+                  const day = entry ? headerDay(nodeText(entry.cell)) : 0;
+                  if (day && dayColumns[day] === undefined) dayColumns[day] = column;
+                }
+              }
+              if (Object.keys(dayColumns).length !== 7) {
+                const startColumn = Math.max(0, maxColumns - 7);
+                for (let day = 1; day <= 7; day++) dayColumns[day] = startColumn + day - 1;
+              }
+              grid.forEach((logicalRow, rowIndex) => {
+                const labels = logicalRow.slice(0, Math.min(4, logicalRow.length))
+                  .filter(Boolean).map(entry => nodeText(entry.cell)).join(' ');
+                const section = sectionFrom(labels, Math.max(1, rowIndex));
+                for (let day = 1; day <= 7; day++) {
+                  const entry = logicalRow[dayColumns[day]];
+                  if (entry && entry.originRow === rowIndex) addCell(day, section, entry.cell);
+                }
+              });
+            }
             function scan(doc) {
               for (const cell of doc.querySelectorAll('td[id],div[id]')) {
                 const id = cell.id || '';
@@ -132,19 +182,7 @@ public final class ImportScript {
               for (const script of doc.querySelectorAll('script[type="application/json"],script[data-course-data]')) {
                 try { scanStructured(JSON.parse(script.textContent || ''), 0); } catch (_) {}
               }
-              for (const table of doc.querySelectorAll('table')) {
-                const rows = Array.from(table.rows || []);
-                rows.forEach((row, rowIndex) => {
-                  const cells = Array.from(row.cells || []);
-                  if (cells.length < 7) return;
-                  const offset = cells.length >= 8 ? cells.length - 7 : 0;
-                  const section = sectionFrom(nodeText(cells[0]), Math.max(1, rowIndex));
-                  for (let day = 1; day <= 7; day++) {
-                    const cell = cells[offset + day - 1];
-                    if (cell) addCell(day, section, cell);
-                  }
-                });
-              }
+              for (const table of doc.querySelectorAll('table')) scanTable(table);
             }
             docs.forEach(scan);
             const html = document.documentElement ? document.documentElement.innerHTML : '';

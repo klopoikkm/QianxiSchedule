@@ -174,7 +174,7 @@ public final class ImportActivity extends Activity {
         webView.getSettings().setLoadWithOverviewMode(true);
         webView.getSettings().setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         webView.getSettings().setUserAgentString(
-                webView.getSettings().getUserAgentString() + " QianxiSchedule/1.2");
+                webView.getSettings().getUserAgentString() + " QianxiSchedule/1.4");
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         webView.setWebChromeClient(new WebChromeClient() {
@@ -397,7 +397,7 @@ public final class ImportActivity extends Activity {
             try {
                 ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(value, adapter);
                 if (outcome.courses.isEmpty()) {
-                    showImportError("当前页面没有识别到课程。请确认已进入当前学期的个人课表页面。");
+                    showImportError(emptyImportMessage(outcome));
                     return;
                 }
                 showImportPreview(outcome);
@@ -405,6 +405,22 @@ public final class ImportActivity extends Activity {
                 showImportError("页面数据解析失败：" + exception.getMessage());
             }
         });
+    }
+
+    private String emptyImportMessage(ImportParser.ImportOutcome outcome) {
+        StringBuilder message = new StringBuilder();
+        message.append("当前页面没有识别到有效课程。请确认已进入当前学期的个人周课表页面。");
+        message.append("\n\n识别器：").append(ImportAdapter.labelOf(outcome.adapterId));
+        if (!outcome.pageTitle.isEmpty()) message.append("\n页面：").append(outcome.pageTitle);
+        String host = Uri.parse(outcome.sourceUrl).getHost();
+        if (host != null && !host.isEmpty()) message.append("\n站点：").append(host);
+        message.append(String.format(Locale.CHINA,
+                "\n诊断：%d 个表格 · %d 个内嵌页面 · %d 条候选 · %d 条无效",
+                outcome.tables, outcome.frames, outcome.candidates, outcome.skippedItems));
+        if (outcome.tables == 0 && outcome.candidates == 0) {
+            message.append("\n\n该页面可能使用了尚未适配的画布或接口数据，请尝试切换到网页版课表。");
+        }
+        return message.toString();
     }
 
     private static String decodeJavascriptString(String value) {

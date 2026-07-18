@@ -39,20 +39,31 @@ public final class ImportParser {
         public final List<Course> courses;
         public final String adapterId;
         public final String source;
+        public final String sourceUrl;
+        public final String pageTitle;
         public final String term;
         public final String campus;
         public final int rawItems;
         public final int skippedItems;
+        public final int frames;
+        public final int tables;
+        public final int candidates;
 
-        ImportOutcome(List<Course> courses, String adapterId, String source, String term,
-                      String campus, int rawItems, int skippedItems) {
+        ImportOutcome(List<Course> courses, String adapterId, String source, String sourceUrl,
+                      String pageTitle, String term, String campus, int rawItems, int skippedItems,
+                      int frames, int tables, int candidates) {
             this.courses = courses;
             this.adapterId = adapterId;
             this.source = source;
+            this.sourceUrl = sourceUrl;
+            this.pageTitle = pageTitle;
             this.term = term;
             this.campus = campus;
             this.rawItems = rawItems;
             this.skippedItems = skippedItems;
+            this.frames = frames;
+            this.tables = tables;
+            this.candidates = candidates;
         }
     }
 
@@ -83,9 +94,14 @@ public final class ImportParser {
             }
             mergeCourse(merged, course);
         }
+        JSONObject diagnostics = root.optJSONObject("diagnostics");
         return new ImportOutcome(new ArrayList<>(merged.values()), adapter,
-                root.optString("source", "page-dom"), root.optString("term", ""),
-                root.optString("campus", ""), items.length(), skipped);
+                root.optString("source", "page-dom"), root.optString("sourceUrl", ""),
+                root.optString("pageTitle", ""), root.optString("term", ""),
+                root.optString("campus", ""), items.length(), skipped,
+                diagnostics == null ? 0 : diagnostics.optInt("frames", 0),
+                diagnostics == null ? 0 : diagnostics.optInt("tables", 0),
+                diagnostics == null ? items.length() : diagnostics.optInt("candidates", items.length()));
     }
 
     private static Course parseItem(JSONObject item, String adapter) {

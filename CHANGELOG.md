@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0
+
+- Rebuilt generic table scanning as a logical grid with rowspan and colspan support.
+- Detected weekday columns from table headers before using positional fallback.
+- Added adapter, page, table, iframe and candidate diagnostics to empty import errors.
+
 ## 1.3.0
 
 - Kept weekday and date headers fixed while the timetable body scrolls vertically.
