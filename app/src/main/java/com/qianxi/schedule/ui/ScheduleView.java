@@ -16,13 +16,11 @@ import com.qianxi.schedule.data.Course;
 import com.qianxi.schedule.data.ScheduleTime;
 
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 public final class ScheduleView extends View {
@@ -65,7 +63,7 @@ public final class ScheduleView extends View {
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         int wantedWidth = Ui.dp(getContext(), 360);
-        int wantedHeight = Ui.dp(getContext(), 760);
+        int wantedHeight = Ui.dp(getContext(), 712);
         setMeasuredDimension(resolveSize(wantedWidth, widthMeasureSpec),
                 resolveSize(wantedHeight, heightMeasureSpec));
     }
@@ -75,17 +73,16 @@ public final class ScheduleView extends View {
         super.onDraw(canvas);
         hitAreas.clear();
         float timeWidth = Ui.dp(getContext(), 34);
-        float headerHeight = Ui.dp(getContext(), 48);
         float dayWidth = (getWidth() - timeWidth) / 7f;
-        float minuteHeight = (getHeight() - headerHeight) / (float) (END_MINUTE - START_MINUTE);
+        float minuteHeight = getHeight() / (float) (END_MINUTE - START_MINUTE);
 
-        drawTodayBand(canvas, timeWidth, headerHeight, dayWidth);
-        drawGrid(canvas, timeWidth, headerHeight, dayWidth, minuteHeight);
-        drawCourses(canvas, timeWidth, headerHeight, dayWidth, minuteHeight);
-        drawNowLine(canvas, timeWidth, headerHeight, dayWidth, minuteHeight);
+        drawTodayBand(canvas, timeWidth, dayWidth);
+        drawGrid(canvas, timeWidth, dayWidth, minuteHeight);
+        drawCourses(canvas, timeWidth, dayWidth, minuteHeight);
+        drawNowLine(canvas, timeWidth, dayWidth, minuteHeight);
     }
 
-    private void drawTodayBand(Canvas canvas, float timeWidth, float headerHeight, float dayWidth) {
+    private void drawTodayBand(Canvas canvas, float timeWidth, float dayWidth) {
         LocalDate today = LocalDate.now();
         for (int day = 0; day < 7; day++) {
             if (weekStart.plusDays(day).equals(today)) {
@@ -94,14 +91,9 @@ public final class ScheduleView extends View {
                         timeWidth + (day + 1) * dayWidth, getHeight(), paint);
             }
         }
-        paint.setColor(Color.WHITE);
-        canvas.drawRect(0, 0, timeWidth, headerHeight, paint);
     }
 
-    private void drawGrid(Canvas canvas, float timeWidth, float headerHeight,
-                          float dayWidth, float minuteHeight) {
-        String[] names = {"一", "二", "三", "四", "五", "六", "日"};
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("d", Locale.CHINA);
+    private void drawGrid(Canvas canvas, float timeWidth, float dayWidth, float minuteHeight) {
         paint.setStrokeWidth(Ui.dp(getContext(), 1));
         paint.setColor(Ui.LINE);
 
@@ -109,28 +101,17 @@ public final class ScheduleView extends View {
             float x = timeWidth + day * dayWidth;
             canvas.drawLine(x, 0, x, getHeight(), paint);
         }
-        canvas.drawLine(0, headerHeight, getWidth(), headerHeight, paint);
 
         for (int hour = 7; hour <= 22; hour++) {
-            float y = headerHeight + (hour * 60 - START_MINUTE) * minuteHeight;
+            float y = (hour * 60 - START_MINUTE) * minuteHeight;
             paint.setColor(hour == 7 ? Ui.LINE : Color.rgb(235, 237, 234));
             canvas.drawLine(timeWidth, y, getWidth(), y, paint);
-            drawCenteredText(canvas, String.format(Locale.CHINA, "%02d", hour),
+            drawCenteredText(canvas, String.format(java.util.Locale.CHINA, "%02d", hour),
                     timeWidth / 2f, y + Ui.dp(getContext(), 10), 9, Ui.MUTED, false);
-        }
-
-        for (int day = 0; day < 7; day++) {
-            float center = timeWidth + (day + 0.5f) * dayWidth;
-            boolean today = weekStart.plusDays(day).equals(LocalDate.now());
-            drawCenteredText(canvas, names[day], center, Ui.dp(getContext(), 19), 11,
-                    today ? Ui.PRIMARY : Ui.INK, true);
-            drawCenteredText(canvas, weekStart.plusDays(day).format(formatter), center,
-                    Ui.dp(getContext(), 38), 9, today ? Ui.PRIMARY : Ui.MUTED, false);
         }
     }
 
-    private void drawCourses(Canvas canvas, float timeWidth, float headerHeight,
-                             float dayWidth, float minuteHeight) {
+    private void drawCourses(Canvas canvas, float timeWidth, float dayWidth, float minuteHeight) {
         Map<Course, Integer> lanes = new IdentityHashMap<>();
         Map<Integer, Integer> laneCounts = assignLanes(lanes);
         for (Course course : courses) {
@@ -141,8 +122,8 @@ public final class ScheduleView extends View {
             float left = timeWidth + (course.dayOfWeek - 1) * dayWidth
                     + Ui.dp(getContext(), 1) + lane * blockWidth;
             float right = left + blockWidth - Ui.dp(getContext(), 1);
-            float top = headerHeight + (Math.max(START_MINUTE, course.startMinute) - START_MINUTE) * minuteHeight + 1;
-            float bottom = headerHeight + (Math.min(END_MINUTE, course.endMinute) - START_MINUTE) * minuteHeight - 1;
+            float top = (Math.max(START_MINUTE, course.startMinute) - START_MINUTE) * minuteHeight + 1;
+            float bottom = (Math.min(END_MINUTE, course.endMinute) - START_MINUTE) * minuteHeight - 1;
             if (bottom <= top) continue;
 
             RectF rect = new RectF(left, top, right, bottom);
@@ -196,15 +177,14 @@ public final class ScheduleView extends View {
         canvas.restore();
     }
 
-    private void drawNowLine(Canvas canvas, float timeWidth, float headerHeight,
-                             float dayWidth, float minuteHeight) {
+    private void drawNowLine(Canvas canvas, float timeWidth, float dayWidth, float minuteHeight) {
         LocalDate today = LocalDate.now();
         if (today.isBefore(weekStart) || today.isAfter(weekStart.plusDays(6))) return;
         java.time.LocalTime now = java.time.LocalTime.now();
         int minute = now.getHour() * 60 + now.getMinute();
         if (minute < START_MINUTE || minute > END_MINUTE) return;
         int day = today.getDayOfWeek().getValue() - 1;
-        float y = headerHeight + (minute - START_MINUTE) * minuteHeight;
+        float y = (minute - START_MINUTE) * minuteHeight;
         float left = timeWidth + day * dayWidth;
         paint.setColor(Ui.ACCENT);
         paint.setStrokeWidth(Ui.dp(getContext(), 2));
@@ -239,12 +219,11 @@ public final class ScheduleView extends View {
                 }
             }
             float timeWidth = Ui.dp(getContext(), 34);
-            float headerHeight = Ui.dp(getContext(), 48);
-            if (event.getX() > timeWidth && event.getY() > headerHeight && listener != null) {
+            if (event.getX() > timeWidth && listener != null) {
                 int day = Math.max(1, Math.min(7,
                         (int) ((event.getX() - timeWidth) / ((getWidth() - timeWidth) / 7f)) + 1));
-                int minute = START_MINUTE + Math.round((event.getY() - headerHeight)
-                        / (getHeight() - headerHeight) * (END_MINUTE - START_MINUTE));
+                int minute = START_MINUTE + Math.round(event.getY()
+                        / getHeight() * (END_MINUTE - START_MINUTE));
                 minute = Math.max(START_MINUTE, Math.min(END_MINUTE - 30, minute / 5 * 5));
                 listener.onEmptySlotClick(day, minute);
             }
