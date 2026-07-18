@@ -43,7 +43,9 @@ public final class MainActivity extends Activity implements ScheduleView.Listene
         settings = new AppSettings(this);
         database = CourseDatabase.get(this);
         selectedWeek = ScheduleTime.weekOf(settings.semesterStart(), LocalDate.now());
-        setContentView(buildContent());
+        View content = buildContent();
+        Ui.applySystemBarInsets(content);
+        setContentView(content);
         AlarmScheduler.ensureDailyRefresh(this);
     }
 

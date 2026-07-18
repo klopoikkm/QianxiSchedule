@@ -1,6 +1,7 @@
 package com.qianxi.schedule.importer;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -22,6 +23,23 @@ public final class ImportAdapterTest {
     public void detectsNortheasternUniversityQinhuangdaoEamsHost() {
         assertEquals(ImportAdapter.NEUQ_EAMS,
                 ImportAdapter.detect("https://jwxt.neuq.edu.cn/eams/homeExt.action"));
+    }
+
+    @Test
+    public void exposesOnlyOneNortheasternUniversityChoice() {
+        assertEquals(ImportAdapter.indexOf(ImportAdapter.NEU),
+                ImportAdapter.indexOf(ImportAdapter.NEUQ_EAMS));
+        for (ImportAdapter.Definition definition : ImportAdapter.definitions()) {
+            assertFalse(ImportAdapter.NEUQ_EAMS.equals(definition.id));
+        }
+    }
+
+    @Test
+    public void unifiedNortheasternUniversityChoiceUsesEamsInternallyForNeuq() {
+        assertEquals(ImportAdapter.NEUQ_EAMS, ImportAdapter.resolve(ImportAdapter.NEU,
+                "https://jwxt.neuq.edu.cn/eams/homeExt.action"));
+        assertEquals(ImportAdapter.NEU, ImportAdapter.resolve(ImportAdapter.NEU,
+                "https://jwxt.neu.edu.cn/"));
     }
 
     @Test

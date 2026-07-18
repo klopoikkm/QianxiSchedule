@@ -4,9 +4,11 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.util.TypedValue;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -29,6 +31,35 @@ public final class Ui {
     public static float sp(Context context, float value) {
         return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, value,
                 context.getResources().getDisplayMetrics());
+    }
+
+    public static void applySystemBarInsets(View root) {
+        final int left = root.getPaddingLeft();
+        final int top = root.getPaddingTop();
+        final int right = root.getPaddingRight();
+        final int bottom = root.getPaddingBottom();
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int insetLeft;
+            int insetTop;
+            int insetRight;
+            int insetBottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                insetLeft = bars.left;
+                insetTop = bars.top;
+                insetRight = bars.right;
+                insetBottom = bars.bottom;
+            } else {
+                insetLeft = insets.getSystemWindowInsetLeft();
+                insetTop = insets.getSystemWindowInsetTop();
+                insetRight = insets.getSystemWindowInsetRight();
+                insetBottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(left + insetLeft, top + insetTop,
+                    right + insetRight, bottom + insetBottom);
+            return insets;
+        });
+        root.requestApplyInsets();
     }
 
     public static TextView text(Context context, String value, float sp, int color) {

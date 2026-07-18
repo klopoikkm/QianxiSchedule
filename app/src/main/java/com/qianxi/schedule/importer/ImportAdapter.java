@@ -31,8 +31,7 @@ public final class ImportAdapter {
 
     private static final List<Definition> DEFINITIONS = Collections.unmodifiableList(Arrays.asList(
             new Definition(AUTO, "自动识别"),
-            new Definition(NEU, "东北大学新版教务"),
-            new Definition(NEUQ_EAMS, "东北大学秦皇岛（EAMS）"),
+            new Definition(NEU, "东北大学教务"),
             new Definition(ZHENGFANG, "正方教务"),
             new Definition(QIANGZHI, "强智教务"),
             new Definition(KINGOSOFT, "青果教务"),
@@ -57,6 +56,9 @@ public final class ImportAdapter {
     }
 
     public static int indexOf(String id) {
+        // Older installs stored the former Qinhuangdao-only adapter id. It now maps to the
+        // single Northeast University choice while retaining host-specific parsing internally.
+        if (NEUQ_EAMS.equals(id)) id = NEU;
         for (int i = 0; i < DEFINITIONS.size(); i++) {
             if (DEFINITIONS.get(i).id.equals(id)) return i;
         }
@@ -64,12 +66,18 @@ public final class ImportAdapter {
     }
 
     public static String labelOf(String id) {
+        if (NEUQ_EAMS.equals(id)) return "东北大学教务";
         return DEFINITIONS.get(indexOf(id)).label;
     }
 
     public static String resolve(String selectedId, String url) {
-        if (!AUTO.equals(selectedId)) return selectedId;
-        return detect(url);
+        String detected = detect(url);
+        if (AUTO.equals(selectedId)) return detected;
+        if ((NEU.equals(selectedId) || NEUQ_EAMS.equals(selectedId))
+                && NEUQ_EAMS.equals(detected)) {
+            return NEUQ_EAMS;
+        }
+        return NEUQ_EAMS.equals(selectedId) ? NEU : selectedId;
     }
 
     public static String detect(String url) {
