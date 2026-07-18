@@ -9,19 +9,24 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Message;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.SafeBrowsingResponse;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
@@ -46,10 +51,15 @@ import java.util.Locale;
 
 public final class ImportActivity extends Activity {
     private static final int MAX_POLL_ATTEMPTS = 160;
+    private static final String DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<SchoolProfile> profiles = new ArrayList<>();
+    private final List<WebView> browserStack = new ArrayList<>();
     private AppSettings settings;
     private WebView webView;
+    private FrameLayout webContainer;
+    private String defaultUserAgent;
     private EditText address;
     private Spinner profileSpinner;
     private Spinner adapterSpinner;
@@ -64,7 +74,9 @@ public final class ImportActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         settings = new AppSettings(this);
-        setContentView(buildContent());
+        View content = buildContent();
+        Ui.applySystemBarInsets(content);
+        setContentView(content);
         reloadProfiles(settings.selectedSchoolProfileId());
     }
 
@@ -80,7 +92,7 @@ public final class ImportActivity extends Activity {
         Button back = Ui.textButton(this, "‹");
         back.setTextSize(28);
         back.setContentDescription("返回");
-        back.setOnClickListener(v -> finish());
+        back.setOnClickListener(v -> navigateBack());
         toolbar.addView(back, new LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 44)));
         TextView title = Ui.text(this, "教务导入", 20, Ui.INK);
         title.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
@@ -88,7 +100,9 @@ public final class ImportActivity extends Activity {
         Button reload = Ui.textButton(this, "↻");
         reload.setTextSize(23);
         reload.setContentDescription("刷新页面");
-        reload.setOnClickListener(v -> webView.reload());
+        reload.setOnClickListener(v -> {
+            if (webView != null) webView.reload();
+        });
         toolbar.addView(reload, new LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 44)));
         root.addView(toolbar);
         root.addView(Ui.divider(this));
@@ -162,56 +176,12 @@ public final class ImportActivity extends Activity {
         root.addView(progress, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 2)));
 
-        webView = new WebView(this);
-        webView.setBackgroundColor(Color.WHITE);
-        webView.getSettings().setJavaScriptEnabled(true);
-        webView.getSettings().setDomStorageEnabled(true);
-        webView.getSettings().setAllowFileAccess(false);
-        webView.getSettings().setAllowContentAccess(false);
-        webView.getSettings().setBuiltInZoomControls(true);
-        webView.getSettings().setDisplayZoomControls(false);
-        webView.getSettings().setUseWideViewPort(true);
-        webView.getSettings().setLoadWithOverviewMode(true);
-        webView.getSettings().setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        webView.getSettings().setUserAgentString(
-                webView.getSettings().getUserAgentString() + " QianxiSchedule/1.5");
-        CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
-        webView.setWebChromeClient(new WebChromeClient() {
-            @Override public void onProgressChanged(WebView view, int value) {
-                progress.setProgress(value);
-                progress.setVisibility(value >= 100 ? View.INVISIBLE : View.VISIBLE);
-            }
-        });
-        webView.setWebViewClient(new WebViewClient() {
-            @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                scanGeneration++;
-                setImporting(false);
-                status.setText("正在载入教务页面…");
-                address.setText(url);
-            }
-
-            @Override public void onPageFinished(WebView view, String url) {
-                String selected = ImportAdapter.idAt(adapterSpinner.getSelectedItemPosition());
-                String resolved = ImportAdapter.resolve(selected, url);
-                status.setText(String.format(Locale.CHINA, "已就绪 · %s", ImportAdapter.labelOf(resolved)));
-                address.setText(url);
-            }
-
-            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                String scheme = request.getUrl().getScheme();
-                if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) return false;
-                Toast.makeText(ImportActivity.this, "已阻止非网页链接", Toast.LENGTH_SHORT).show();
-                return true;
-            }
-
-            @SuppressLint("NewApi")
-            @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest request,
-                                                     int threatType, SafeBrowsingResponse callback) {
-                callback.backToSafety(true);
-            }
-        });
-        root.addView(webView, new LinearLayout.LayoutParams(
+        webContainer = new FrameLayout(this);
+        webView = createWebView();
+        browserStack.add(webView);
+        webContainer.addView(webView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(webContainer, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         root.addView(Ui.divider(this));
@@ -228,11 +198,112 @@ public final class ImportActivity extends Activity {
         return root;
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
+    private WebView createWebView() {
+        WebView view = new WebView(this);
+        view.setBackgroundColor(Color.WHITE);
+        WebSettings webSettings = view.getSettings();
+        webSettings.setJavaScriptEnabled(true);
+        webSettings.setJavaScriptCanOpenWindowsAutomatically(true);
+        webSettings.setSupportMultipleWindows(true);
+        webSettings.setDomStorageEnabled(true);
+        webSettings.setDatabaseEnabled(true);
+        webSettings.setAllowFileAccess(false);
+        webSettings.setAllowContentAccess(false);
+        webSettings.setBuiltInZoomControls(true);
+        webSettings.setDisplayZoomControls(false);
+        webSettings.setSupportZoom(true);
+        webSettings.setUseWideViewPort(true);
+        webSettings.setLoadWithOverviewMode(true);
+        webSettings.setLoadsImagesAutomatically(true);
+        webSettings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        if (defaultUserAgent == null) defaultUserAgent = WebSettings.getDefaultUserAgent(this);
+        webSettings.setUserAgentString(defaultUserAgent);
+
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        cookieManager.setAcceptThirdPartyCookies(view, true);
+        view.setWebChromeClient(new WebChromeClient() {
+            @Override public void onProgressChanged(WebView view, int value) {
+                progress.setProgress(value);
+                progress.setVisibility(value >= 100 ? View.INVISIBLE : View.VISIBLE);
+            }
+
+            @Override public boolean onCreateWindow(WebView source, boolean isDialog,
+                                                     boolean isUserGesture, Message resultMsg) {
+                if (!(resultMsg.obj instanceof WebView.WebViewTransport) || webContainer == null) {
+                    return false;
+                }
+                WebView popup = createWebView();
+                browserStack.add(popup);
+                webContainer.addView(popup, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                setActiveWebView(popup);
+                WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
+                transport.setWebView(popup);
+                resultMsg.sendToTarget();
+                return true;
+            }
+
+            @Override public void onCloseWindow(WebView window) {
+                closeWebView(window);
+            }
+        });
+        view.setWebViewClient(new WebViewClient() {
+            @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                setActiveWebView(view);
+                applyCompatibility(view, url);
+                scanGeneration++;
+                setImporting(false);
+                status.setText("正在载入教务页面…");
+                address.setText(url);
+            }
+
+            @Override public void onPageFinished(WebView view, String url) {
+                String selected = ImportAdapter.idAt(adapterSpinner.getSelectedItemPosition());
+                String resolved = ImportAdapter.resolve(selected, url);
+                status.setText(String.format(Locale.CHINA, "已就绪 · %s", ImportAdapter.labelOf(resolved)));
+                address.setText(url);
+            }
+
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return handleNavigation(view, request.getUrl().toString());
+            }
+
+            @Override public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                return handleNavigation(view, url);
+            }
+
+            @Override public void onReceivedError(WebView view, WebResourceRequest request,
+                                                   WebResourceError error) {
+                if (request.isForMainFrame()) {
+                    status.setText(String.format(Locale.CHINA,
+                            "页面加载失败 · %s", error.getDescription()));
+                }
+            }
+
+            @Override public void onReceivedHttpError(WebView view, WebResourceRequest request,
+                                                       WebResourceResponse errorResponse) {
+                if (request.isForMainFrame()) {
+                    status.setText(String.format(Locale.CHINA,
+                            "页面加载失败 · HTTP %d", errorResponse.getStatusCode()));
+                }
+            }
+
+            @SuppressLint("NewApi")
+            @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest request,
+                                                     int threatType, SafeBrowsingResponse callback) {
+                callback.backToSafety(true);
+            }
+        });
+        return view;
+    }
+
     private void reloadProfiles(String selectedId) {
         profiles.clear();
         profiles.add(SchoolProfile.customEntry());
         profiles.add(SchoolProfile.northeasternUniversity());
-        profiles.add(SchoolProfile.northeasternUniversityQinhuangdao());
         profiles.addAll(settings.customSchoolProfiles());
         profileAdapter.notifyDataSetChanged();
         int selected = 0;
@@ -350,7 +421,66 @@ public final class ImportActivity extends Activity {
         settings.setSchoolUrl(url);
         settings.setSelectedAdapterId(ImportAdapter.idAt(adapterSpinner.getSelectedItemPosition()));
         address.setText(url);
+        applyCompatibility(webView, url);
         webView.loadUrl(url);
+    }
+
+    private boolean handleNavigation(WebView view, String url) {
+        if (url == null || url.trim().isEmpty()) return true;
+        String scheme = Uri.parse(url).getScheme();
+        if (scheme == null) return false;
+        if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
+            applyCompatibility(view, url);
+            return false;
+        }
+        // Legacy EAMS menus commonly use javascript: links; about/data/blob are also used by
+        // authenticated pages for in-page navigation and generated timetable documents.
+        if ("javascript".equalsIgnoreCase(scheme) || "about".equalsIgnoreCase(scheme)
+                || "data".equalsIgnoreCase(scheme) || "blob".equalsIgnoreCase(scheme)) {
+            return false;
+        }
+        Toast.makeText(this, "已阻止非网页链接", Toast.LENGTH_SHORT).show();
+        return true;
+    }
+
+    private void applyCompatibility(WebView view, String url) {
+        if (view == null) return;
+        boolean legacyEams = isLegacyEamsUrl(url);
+        boolean cleartext = url != null && url.toLowerCase(Locale.ROOT).startsWith("http://");
+        WebSettings webSettings = view.getSettings();
+        String desiredAgent = legacyEams ? DESKTOP_USER_AGENT : defaultUserAgent;
+        if (desiredAgent != null && !desiredAgent.equals(webSettings.getUserAgentString())) {
+            webSettings.setUserAgentString(desiredAgent);
+        }
+        webSettings.setMixedContentMode(legacyEams || cleartext
+                ? WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                : WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+    }
+
+    private static boolean isLegacyEamsUrl(String url) {
+        if (url == null) return false;
+        Uri uri = Uri.parse(url);
+        String host = uri.getHost();
+        String path = uri.getPath();
+        return (host != null && ("jwxt.neuq.edu.cn".equalsIgnoreCase(host)
+                || host.toLowerCase(Locale.ROOT).endsWith(".jwxt.neuq.edu.cn")))
+                || (path != null && path.toLowerCase(Locale.ROOT).contains("/eams/"));
+    }
+
+    private void setActiveWebView(WebView view) {
+        if (view == null || !browserStack.contains(view)) return;
+        webView = view;
+        view.bringToFront();
+    }
+
+    private void closeWebView(WebView view) {
+        if (view == null || browserStack.size() <= 1 || !browserStack.remove(view)) return;
+        if (webContainer != null) webContainer.removeView(view);
+        view.stopLoading();
+        view.destroy();
+        setActiveWebView(browserStack.get(browserStack.size() - 1));
+        String url = webView.getUrl();
+        if (url != null) address.setText(url);
     }
 
     private void scanPage() {
@@ -505,22 +635,32 @@ public final class ImportActivity extends Activity {
                 [Math.max(1, Math.min(7, day)) - 1];
     }
 
+    private void navigateBack() {
+        if (webView != null && webView.canGoBack()) {
+            webView.goBack();
+        } else if (webView != null && browserStack.size() > 1) {
+            closeWebView(webView);
+        } else {
+            finish();
+        }
+    }
+
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) webView.goBack();
-        else super.onBackPressed();
+        navigateBack();
     }
 
     @Override
     protected void onDestroy() {
         scanGeneration++;
         handler.removeCallbacksAndMessages(null);
-        if (webView != null) {
-            webView.stopLoading();
-            webView.removeAllViews();
-            webView.destroy();
-            webView = null;
+        for (WebView view : new ArrayList<>(browserStack)) {
+            view.stopLoading();
+            view.removeAllViews();
+            view.destroy();
         }
+        browserStack.clear();
+        webView = null;
         super.onDestroy();
     }
 }

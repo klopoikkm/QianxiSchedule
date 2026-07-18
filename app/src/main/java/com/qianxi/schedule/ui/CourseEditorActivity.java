@@ -66,7 +66,9 @@ public final class CourseEditorActivity extends Activity {
         originalStartWeek = course.startWeek;
         originalEndWeek = course.endWeek;
         originalParity = course.parity;
-        setContentView(buildContent());
+        View content = buildContent();
+        Ui.applySystemBarInsets(content);
+        setContentView(content);
         bindCourse();
     }
 

@@ -385,7 +385,7 @@ public final class ImportScript {
           (async function () {
             try {
               if (!/^jwxt\\.neuq\\.edu\\.cn$/i.test(location.hostname)) {
-                throw new Error('东北大学秦皇岛适配器只能在 jwxt.neuq.edu.cn 内运行');
+                throw new Error('东北大学教务适配器无法识别当前域名');
               }
               const currentHtml = document.documentElement ? document.documentElement.outerHTML : '';
               const landing = await fetchText('/eams/courseTableForStd.action');

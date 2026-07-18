@@ -49,7 +49,9 @@ public final class SettingsActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         settings = new AppSettings(this);
-        setContentView(buildContent());
+        View content = buildContent();
+        Ui.applySystemBarInsets(content);
+        setContentView(content);
     }
 
     private View buildContent() {
