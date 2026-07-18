@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0
+
+- Added a next-class summary to the timetable home screen.
+- Added local JSON backup export/import with validation and merge/replace restore.
+- Extended generic import scanning for SPA JSON state, data attributes and common grid IDs.
+- Added backup parser regression tests.
+
 ## 1.1.0
 
 - Redesigned the timetable for seven-day, no-horizontal-scroll phone layouts.
