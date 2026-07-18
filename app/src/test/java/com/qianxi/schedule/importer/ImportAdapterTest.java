@@ -43,11 +43,28 @@ public final class ImportAdapterTest {
     }
 
     @Test
-    public void neuqAdapterUsesAuthenticatedCourseTableEndpoint() {
+    public void detectsCompatibleSystemsFromCustomUrlPaths() {
+        assertEquals(ImportAdapter.NEUQ_EAMS,
+                ImportAdapter.detect("https://jw.example.edu.cn/eams/homeExt.action"));
+        assertEquals(ImportAdapter.NEU,
+                ImportAdapter.detect("https://jw.example.edu.cn/jwapp/sys/homeapp/index.do"));
+    }
+
+    @Test
+    public void specialAdaptersDoNotRejectCustomHosts() {
+        assertFalse(ImportScript.forAdapter(ImportAdapter.NEU).contains("jwxt\\.neu\\.edu\\.cn$"));
+        assertFalse(ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS)
+                .contains("jwxt\\.neuq\\.edu\\.cn$"));
+        assertFalse(ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS).contains("courseTableForStd"));
+    }
+
+    @Test
+    public void allAdaptersScanOnlyTheCurrentPage() {
+        String generic = ImportScript.forAdapter(ImportAdapter.GENERIC);
+        assertEquals(generic, ImportScript.forAdapter(ImportAdapter.NEU));
+        assertEquals(generic, ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS));
         String script = ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS);
-        assertTrue(script.contains("/eams/courseTableForStd.action"));
-        assertTrue(script.contains("/eams/courseTableForStd!courseTable.action"));
-        assertTrue(script.contains("semester.id"));
-        assertTrue(script.contains("credentials: 'include'"));
+        assertTrue(script.contains("document.querySelectorAll"));
+        assertFalse(script.contains("fetch("));
     }
 }

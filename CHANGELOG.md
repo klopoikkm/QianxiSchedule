@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.7.0
+
+- Removed fixed school URLs so any academic-system address can be entered or saved.
+- Removed hostname restrictions from specialized Northeast University adapters.
+- Detected compatible EAMS and JWAPP systems from URL paths on custom domains.
+- Changed all adapters to scan only the timetable page opened by the user.
+- Added WebView connection, TLS and render-process diagnostics with generic-page fallback.
+
+## 1.6.0
+
+- Fixed legacy JavaScript menus, popup windows and target-window form navigation.
+- Unified Northeast University adapters into a single visible choice.
+- Applied system-bar insets to every screen.
+
 ## 1.5.0
 
 - Added a dedicated Northeastern University at Qinhuangdao EAMS adapter.

@@ -3,9 +3,13 @@ package com.qianxi.schedule.ui;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
+import android.net.http.SslError;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -13,8 +17,11 @@ import android.os.Message;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 import android.webkit.CookieManager;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.SafeBrowsingResponse;
+import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -51,15 +58,12 @@ import java.util.Locale;
 
 public final class ImportActivity extends Activity {
     private static final int MAX_POLL_ATTEMPTS = 160;
-    private static final String DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<SchoolProfile> profiles = new ArrayList<>();
     private final List<WebView> browserStack = new ArrayList<>();
     private AppSettings settings;
     private WebView webView;
     private FrameLayout webContainer;
-    private String defaultUserAgent;
     private EditText address;
     private Spinner profileSpinner;
     private Spinner adapterSpinner;
@@ -154,12 +158,20 @@ public final class ImportActivity extends Activity {
         addressRow.setGravity(Gravity.CENTER_VERTICAL);
         address = new EditText(this);
         address.setSingleLine(true);
+        address.setImeOptions(EditorInfo.IME_ACTION_GO);
         address.setTextSize(14);
         address.setTextColor(Ui.INK);
         address.setHint("https://学校教务网址/");
         address.setText(settings.schoolUrl());
         address.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 10), 0);
         address.setBackground(Ui.rounded(Color.WHITE, 6, this));
+        address.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_GO) {
+                openAddress();
+                return true;
+            }
+            return false;
+        });
         Button open = Ui.textButton(this, "打开");
         open.setOnClickListener(v -> openAddress());
         addressRow.addView(address, new LinearLayout.LayoutParams(0, Ui.dp(this, 44), 1));
@@ -188,7 +200,7 @@ public final class ImportActivity extends Activity {
         LinearLayout bottom = new LinearLayout(this);
         bottom.setGravity(Gravity.CENTER_VERTICAL);
         bottom.setPadding(Ui.dp(this, 12), Ui.dp(this, 7), Ui.dp(this, 10), Ui.dp(this, 7));
-        status = Ui.text(this, "选择入口并登录教务系统", 12, Ui.MUTED);
+        status = Ui.text(this, "输入网址，进入个人课表后拉取", 12, Ui.MUTED);
         status.setMaxLines(2);
         bottom.addView(status, new LinearLayout.LayoutParams(0, Ui.dp(this, 46), 1));
         importButton = Ui.primaryButton(this, "拉取课表");
@@ -216,10 +228,10 @@ public final class ImportActivity extends Activity {
         webSettings.setUseWideViewPort(true);
         webSettings.setLoadWithOverviewMode(true);
         webSettings.setLoadsImagesAutomatically(true);
+        webSettings.setBlockNetworkLoads(false);
+        webSettings.setBlockNetworkImage(false);
         webSettings.setCacheMode(WebSettings.LOAD_DEFAULT);
         webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        if (defaultUserAgent == null) defaultUserAgent = WebSettings.getDefaultUserAgent(this);
-        webSettings.setUserAgentString(defaultUserAgent);
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
@@ -261,6 +273,7 @@ public final class ImportActivity extends Activity {
             }
 
             @Override public void onPageFinished(WebView view, String url) {
+                CookieManager.getInstance().flush();
                 String selected = ImportAdapter.idAt(adapterSpinner.getSelectedItemPosition());
                 String resolved = ImportAdapter.resolve(selected, url);
                 status.setText(String.format(Locale.CHINA, "已就绪 · %s", ImportAdapter.labelOf(resolved)));
@@ -278,17 +291,38 @@ public final class ImportActivity extends Activity {
             @Override public void onReceivedError(WebView view, WebResourceRequest request,
                                                    WebResourceError error) {
                 if (request.isForMainFrame()) {
-                    status.setText(String.format(Locale.CHINA,
-                            "页面加载失败 · %s", error.getDescription()));
+                    showPageLoadError(view, request.getUrl().toString(),
+                            webErrorMessage(error.getErrorCode(), error.getDescription()));
                 }
             }
 
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest request,
                                                        WebResourceResponse errorResponse) {
                 if (request.isForMainFrame()) {
-                    status.setText(String.format(Locale.CHINA,
-                            "页面加载失败 · HTTP %d", errorResponse.getStatusCode()));
+                    showPageLoadError(view, request.getUrl().toString(), String.format(Locale.CHINA,
+                            "服务器返回 HTTP %d。请确认网址和登录状态。",
+                            errorResponse.getStatusCode()));
                 }
+            }
+
+            @SuppressLint("WebViewClientOnReceivedSslError")
+            @Override public void onReceivedSslError(WebView view, SslErrorHandler handler,
+                                                     SslError error) {
+                AlertDialog dialog = new AlertDialog.Builder(ImportActivity.this)
+                        .setTitle("网站证书验证失败")
+                        .setMessage("无法验证该教务网站的 HTTPS 证书。仅在确认网址属于学校且证书问题是学校已知故障时继续。\n\n"
+                                + error.getUrl())
+                        .setNegativeButton("取消", (ignored, which) -> handler.cancel())
+                        .setPositiveButton("仅本次继续", (ignored, which) -> handler.proceed())
+                        .create();
+                dialog.setOnCancelListener(ignored -> handler.cancel());
+                dialog.show();
+            }
+
+            @Override public boolean onRenderProcessGone(WebView view,
+                                                          RenderProcessGoneDetail detail) {
+                recoverWebView(view, detail.didCrash());
+                return true;
             }
 
             @SuppressLint("NewApi")
@@ -303,7 +337,6 @@ public final class ImportActivity extends Activity {
     private void reloadProfiles(String selectedId) {
         profiles.clear();
         profiles.add(SchoolProfile.customEntry());
-        profiles.add(SchoolProfile.northeasternUniversity());
         profiles.addAll(settings.customSchoolProfiles());
         profileAdapter.notifyDataSetChanged();
         int selected = 0;
@@ -439,7 +472,23 @@ public final class ImportActivity extends Activity {
                 || "data".equalsIgnoreCase(scheme) || "blob".equalsIgnoreCase(scheme)) {
             return false;
         }
-        Toast.makeText(this, "已阻止非网页链接", Toast.LENGTH_SHORT).show();
+        if ("file".equalsIgnoreCase(scheme) || "content".equalsIgnoreCase(scheme)) {
+            Toast.makeText(this, "已阻止本地文件链接", Toast.LENGTH_SHORT).show();
+            return true;
+        }
+        try {
+            Intent intent = "intent".equalsIgnoreCase(scheme)
+                    ? Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                    : new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            intent.addCategory(Intent.CATEGORY_BROWSABLE);
+            intent.setComponent(null);
+            intent.setSelector(null);
+            startActivity(intent);
+        } catch (ActivityNotFoundException ignored) {
+            Toast.makeText(this, "没有应用可以打开该认证链接", Toast.LENGTH_SHORT).show();
+        } catch (Exception exception) {
+            Toast.makeText(this, "认证链接无效", Toast.LENGTH_SHORT).show();
+        }
         return true;
     }
 
@@ -448,13 +497,63 @@ public final class ImportActivity extends Activity {
         boolean legacyEams = isLegacyEamsUrl(url);
         boolean cleartext = url != null && url.toLowerCase(Locale.ROOT).startsWith("http://");
         WebSettings webSettings = view.getSettings();
-        String desiredAgent = legacyEams ? DESKTOP_USER_AGENT : defaultUserAgent;
-        if (desiredAgent != null && !desiredAgent.equals(webSettings.getUserAgentString())) {
-            webSettings.setUserAgentString(desiredAgent);
-        }
         webSettings.setMixedContentMode(legacyEams || cleartext
                 ? WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 : WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+    }
+
+    private String webErrorMessage(int errorCode, CharSequence description) {
+        switch (errorCode) {
+            case WebViewClient.ERROR_TIMEOUT:
+                return "连接超时。该教务站点可能仅限校园网或学校 VPN，也可能暂时停机。";
+            case WebViewClient.ERROR_HOST_LOOKUP:
+                return "无法解析网站域名。请检查网址、网络或学校 VPN。";
+            case WebViewClient.ERROR_CONNECT:
+                return "无法连接服务器。请确认站点是否要求校园网或学校 VPN。";
+            case WebViewClient.ERROR_FAILED_SSL_HANDSHAKE:
+                return "HTTPS 握手失败，网站证书或 TLS 配置可能不兼容。";
+            case WebViewClient.ERROR_AUTHENTICATION:
+                return "网站身份认证失败，请刷新后重新登录。";
+            default:
+                String detail = description == null ? "未知网络错误" : description.toString();
+                return "网页加载失败：" + detail;
+        }
+    }
+
+    private void showPageLoadError(WebView view, String url, String message) {
+        if (isFinishing() || isDestroyed()) return;
+        status.setText("网页无法打开");
+        String engine = webViewEngine();
+        new AlertDialog.Builder(this)
+                .setTitle("网页无法打开")
+                .setMessage(message + "\n\n网址：" + url + "\n浏览器内核：" + engine)
+                .setNegativeButton("关闭", null)
+                .setPositiveButton("重试", (ignored, which) -> {
+                    if (view != null) view.reload();
+                })
+                .show();
+    }
+
+    private String webViewEngine() {
+        PackageInfo info = WebView.getCurrentWebViewPackage();
+        if (info == null) return "系统 WebView 不可用";
+        return info.packageName + " " + info.versionName;
+    }
+
+    private void recoverWebView(WebView failedView, boolean crashed) {
+        int index = browserStack.indexOf(failedView);
+        if (index < 0) return;
+        browserStack.remove(index);
+        if (webContainer != null) webContainer.removeView(failedView);
+        failedView.destroy();
+        if (browserStack.isEmpty()) {
+            WebView replacement = createWebView();
+            browserStack.add(replacement);
+            webContainer.addView(replacement, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        setActiveWebView(browserStack.get(browserStack.size() - 1));
+        status.setText(crashed ? "浏览器内核已恢复，请重新打开网址" : "浏览器已重新载入");
     }
 
     private static boolean isLegacyEamsUrl(String url) {
