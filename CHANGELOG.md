@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1
+
+- Made the settings screen vertically scrollable while keeping its toolbar fixed.
+- Kept permissions, backup controls and app information reachable on compact phones.
+
 ## 1.2.0
 
 - Added a next-class summary to the timetable home screen.

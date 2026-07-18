@@ -16,6 +16,7 @@ import android.webkit.CookieManager;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -70,7 +71,13 @@ public final class SettingsActivity extends Activity {
         root.addView(toolbar);
         root.addView(Ui.divider(this));
 
-        root.addView(Ui.sectionTitle(this, "上课模式"));
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+
+        content.addView(Ui.sectionTitle(this, "上课模式"));
         LinearLayout silentRow = row();
         LinearLayout silentText = labels("上课自动静音", "课程重叠时会保持静音，最后一节结束后恢复原状态");
         silentRow.addView(silentText, new LinearLayout.LayoutParams(0, Ui.dp(this, 70), 1));
@@ -79,11 +86,11 @@ public final class SettingsActivity extends Activity {
         autoSilent.setContentDescription("开启上课自动静音");
         autoSilent.setOnCheckedChangeListener(this::onAutoSilentChanged);
         silentRow.addView(autoSilent, new LinearLayout.LayoutParams(Ui.dp(this, 64), Ui.dp(this, 60)));
-        root.addView(silentRow);
+        content.addView(silentRow);
 
         permissionStatus = Ui.text(this, "", 13, Ui.MUTED);
         permissionStatus.setPadding(Ui.dp(this, 20), Ui.dp(this, 8), Ui.dp(this, 20), Ui.dp(this, 8));
-        root.addView(permissionStatus, new LinearLayout.LayoutParams(
+        content.addView(permissionStatus, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout permissionActions = new LinearLayout(this);
@@ -94,10 +101,10 @@ public final class SettingsActivity extends Activity {
         exact.setOnClickListener(v -> requestExactAlarmAccess());
         permissionActions.addView(policy, new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1));
         permissionActions.addView(exact, new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1));
-        root.addView(permissionActions);
-        root.addView(Ui.divider(this));
+        content.addView(permissionActions);
+        content.addView(Ui.divider(this));
 
-        root.addView(Ui.sectionTitle(this, "学期"));
+        content.addView(Ui.sectionTitle(this, "学期"));
         LinearLayout semesterRow = row();
         LinearLayout semesterText = labels("第一周开始日期", "选择第一周内任意日期，应用会自动对齐到周一");
         semesterRow.addView(semesterText, new LinearLayout.LayoutParams(0, Ui.dp(this, 70), 1));
@@ -105,10 +112,10 @@ public final class SettingsActivity extends Activity {
         semesterValue.setGravity(Gravity.CENTER);
         semesterRow.addView(semesterValue, new LinearLayout.LayoutParams(Ui.dp(this, 110), Ui.dp(this, 60)));
         semesterRow.setOnClickListener(v -> pickSemesterDate());
-        root.addView(semesterRow);
-        root.addView(Ui.divider(this));
+        content.addView(semesterRow);
+        content.addView(Ui.divider(this));
 
-        root.addView(Ui.sectionTitle(this, "教务登录"));
+        content.addView(Ui.sectionTitle(this, "教务登录"));
         LinearLayout cookies = row();
         cookies.addView(labels("清除教务登录状态", "移除 WebView Cookie，下次导入时需重新登录"),
                 new LinearLayout.LayoutParams(0, Ui.dp(this, 70), 1));
@@ -119,10 +126,10 @@ public final class SettingsActivity extends Activity {
             CookieManager.getInstance().flush();
         });
         cookies.addView(clear, new LinearLayout.LayoutParams(Ui.dp(this, 72), Ui.dp(this, 52)));
-        root.addView(cookies);
-        root.addView(Ui.divider(this));
+        content.addView(cookies);
+        content.addView(Ui.divider(this));
 
-        root.addView(Ui.sectionTitle(this, "数据迁移"));
+        content.addView(Ui.sectionTitle(this, "数据迁移"));
         LinearLayout backupActions = new LinearLayout(this);
         backupActions.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 8), Ui.dp(this, 10));
         Button export = Ui.textButton(this, "导出备份");
@@ -133,14 +140,18 @@ public final class SettingsActivity extends Activity {
         importBackup.setOnClickListener(v -> importBackup());
         backupActions.addView(export, new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1));
         backupActions.addView(importBackup, new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1));
-        root.addView(backupActions);
-        root.addView(Ui.divider(this));
+        content.addView(backupActions);
+        content.addView(Ui.divider(this));
 
-        root.addView(Ui.sectionTitle(this, "关于"));
-        LinearLayout about = labels("潜溪课表 1.2.0", "课程数据与教务页面只在本机处理 · MIT License");
+        content.addView(Ui.sectionTitle(this, "关于"));
+        LinearLayout about = labels("潜溪课表 1.2.1", "课程数据与教务页面只在本机处理 · MIT License");
         about.setPadding(Ui.dp(this, 20), 0, Ui.dp(this, 20), 0);
-        root.addView(about, new LinearLayout.LayoutParams(
+        content.addView(about, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 70)));
+        scroll.addView(content, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         return root;
     }
 
