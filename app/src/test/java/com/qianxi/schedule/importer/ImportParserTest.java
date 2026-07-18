@@ -86,4 +86,20 @@ public final class ImportParserTest {
         assertEquals(21 * 60 + 25, ImportParser.parseClock("21:25"));
         assertEquals(-1, ImportParser.parseClock("25:90"));
     }
+
+    @Test
+    public void preservesPageDiagnosticsForUnsupportedLayouts() throws Exception {
+        String payload = "{\"adapter\":\"zhengfang\",\"source\":\"page-dom\","
+                + "\"sourceUrl\":\"https://jwgl.example.edu/kb\",\"pageTitle\":\"个人课表\","
+                + "\"diagnostics\":{\"frames\":1,\"tables\":3,\"candidates\":2},\"items\":[]}";
+
+        ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(
+                JSONObject.quote(payload), ImportAdapter.AUTO);
+
+        assertEquals("个人课表", outcome.pageTitle);
+        assertEquals("https://jwgl.example.edu/kb", outcome.sourceUrl);
+        assertEquals(1, outcome.frames);
+        assertEquals(3, outcome.tables);
+        assertEquals(2, outcome.candidates);
+    }
 }
