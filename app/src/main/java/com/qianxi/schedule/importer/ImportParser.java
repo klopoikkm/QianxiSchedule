@@ -118,14 +118,23 @@ public final class ImportParser {
         course.dayOfWeek = day;
         course.name = normalize(item.optString("name", ""));
         if (course.name.isEmpty()) course.name = extractName(text);
+
+        course.teacher = normalize(item.optString("teacher", ""));
+        course.location = normalize(item.optString("location", ""));
+
+        // EAMS/beangle cells embed teacher and room inside the course string, e.g.
+        // "人工智能导论(3030113067.01)(吕宪伟)n(4-15,工学馆307)". Pull them out of whatever
+        // text we have (name or full text) before cleaning the course name down to just the title.
+        String source = course.name.isEmpty() ? text : course.name + "\n" + text;
+        if (course.teacher.isEmpty()) course.teacher = extractTeacher(source);
+        if (course.location.isEmpty()) course.location = extractRoom(source);
+
         course.name = cleanupName(course.name);
         if (course.name.isEmpty() || isNoise(course.name)) return null;
 
-        course.teacher = normalize(item.optString("teacher", ""));
         if (course.teacher.isEmpty()) {
             course.teacher = extractLabeled(text, "(?:任课)?教师|老师|授课教师|主讲教师");
         }
-        course.location = normalize(item.optString("location", ""));
         if (course.location.isEmpty()) {
             course.location = extractLabeled(text, "上课地点|地点|教室|校区");
         }
@@ -140,6 +149,10 @@ public final class ImportParser {
             course.endMinute = endForSection(sectionRange[1], adapter);
         }
         if (course.endMinute <= course.startMinute) return null;
+        // Period-grid position comes straight from the section range so the grid does not have to
+        // re-derive it from minutes (WakeUp's startNode/step model).
+        course.startNode = Math.max(1, sectionRange[0]);
+        course.step = Math.max(1, sectionRange[1] - sectionRange[0] + 1);
 
         String weekText = normalize(item.optString("weeks", ""));
         long weekMask = weekText.isEmpty() ? extractWeeks(text) : extractWeeks(ensureWeekSuffix(weekText));
@@ -182,7 +195,11 @@ public final class ImportParser {
         if (!labeled.isEmpty()) return labeled;
         for (String line : text.split("\\n")) {
             String value = cleanupName(line);
-            if (value.length() < 2 || isMetadata(value) || value.matches("^[\\d\\W_]+$")) continue;
+            // Require at least one CJK ideograph or ASCII letter; a line of only digits and
+            // punctuation is metadata, not a course. (Java's \\W treats CJK as non-word, so the
+            // old ^[\\d\\W_]+$ guard wrongly rejected every Chinese course name.)
+            if (value.length() < 2 || isMetadata(value)
+                    || !value.matches(".*[\\u4e00-\\u9fa5A-Za-z].*")) continue;
             return value;
         }
         return "";
@@ -207,6 +224,16 @@ public final class ImportParser {
     }
 
     static long extractWeeks(String text) {
+        // A pure binary week string (bit n = week n+1), as emitted by beangle EAMS TaskActivity.
+        // Handle it directly so no week is lost in the range-text round trip.
+        String trimmed = text == null ? "" : text.trim();
+        if (trimmed.length() >= 4 && trimmed.matches("[01]+")) {
+            long binMask = 0L;
+            for (int i = 0; i < trimmed.length() && i < 60; i++) {
+                if (trimmed.charAt(i) == '1') binMask |= 1L << i;
+            }
+            if (binMask != 0L) return binMask;
+        }
         Matcher area = Pattern.compile("((?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?\\s*[,，、]?\\s*)+)周(?:\\s*[（(]?(单|双)周?[）)]?)?")
                 .matcher(text);
         if (!area.find()) return 0L;
@@ -226,6 +253,9 @@ public final class ImportParser {
     }
 
     private static String ensureWeekSuffix(String value) {
+        // A binary week string is parsed as-is by extractWeeks; don't append 周 (it would break it).
+        String trimmed = value == null ? "" : value.trim();
+        if (trimmed.length() >= 4 && trimmed.matches("[01]+")) return trimmed;
         return value.contains("周") ? value : value + "周";
     }
 
@@ -286,9 +316,66 @@ public final class ImportParser {
                 .replaceAll("[ \\t]+", " ").replaceAll("\\n\\s*\\n+", "\\n").trim();
     }
 
+    /**
+     * Extracts a teacher name from an EAMS course string. The format is typically
+     * "课程名(课程号)(教师名)周次信息", so the teacher is a 2–4 character Chinese name in
+     * parentheses that is NOT a course code and NOT a building/room token.
+     */
+    private static String extractTeacher(String text) {
+        // Multiple teachers can be co-listed in one parenthesis group ("张三,李四" / "张三、李四")
+        // or in adjacent groups. Collect each valid Chinese name once, in order, and join with a
+        // comma so the card shows the full teaching team rather than only the first name.
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        Matcher matcher = Pattern.compile("[\\(（]([\\u4e00-\\u9fa5A-Za-z,，、/\\s]{2,40})[\\)）]").matcher(text);
+        while (matcher.find()) {
+            for (String part : matcher.group(1).split("[,，、/\\s]+")) {
+                String candidate = part.trim();
+                if (candidate.length() < 2 || candidate.length() > 5) continue;
+                // Skip room/building tokens and non-teacher roles.
+                if (candidate.matches(".*(馆|楼|室|房|区|中心|校区)$")) continue;
+                if (candidate.matches("^(实验辅导?老师|辅导教师|助教|监考老师|教师|老师)$")) continue;
+                if (!candidate.matches("[\\u4e00-\\u9fa5]{2,5}")) continue;
+                names.add(candidate);
+            }
+        }
+        return String.join(",", names);
+    }
+
+    /**
+     * Extracts a classroom/building token from an EAMS course string, e.g. "工学馆307",
+     * "工学馆216", "乒乓球室". Rooms usually appear after weeks like "(4-15,工学馆307)".
+     */
+    private static String extractRoom(String text) {
+        // Building + room number, e.g. 工学馆307, A303, 第一教学楼216, 3号教学楼201, 科技楼B105.
+        Matcher matcher = Pattern.compile(
+                "([\\u4e00-\\u9fa5A-Za-z0-9]{1,10}?(?:馆|楼|室|房|中心|教室|机房|操场|球场)[A-Za-z]?\\d{1,4})")
+                .matcher(text);
+        if (matcher.find()) return matcher.group(1);
+        // Standalone place ending in a place word without a number, e.g. 乒乓球室, 体育馆, 实验中心.
+        matcher = Pattern.compile("([\\u4e00-\\u9fa5]{2,10}(?:室|馆|中心|操场|球场|机房))").matcher(text);
+        if (matcher.find()) return matcher.group(1);
+        // Bare building+number without a place word, e.g. after a comma: ",A303)" or ",信息楼201".
+        matcher = Pattern.compile("[,，]\\s*([A-Za-z\\u4e00-\\u9fa5]{1,8}\\d{2,4})\\s*[\\)）]?").matcher(text);
+        if (matcher.find()) return matcher.group(1);
+        return "";
+    }
+
     private static String cleanupName(String value) {
-        return value.replaceFirst("^(课程名称|课程名|课程|科目)\\s*[:：]?\\s*", "")
-                .replaceAll("^[·•\\-—\\s]+|[·•\\-—\\s]+$", "").trim();
+        // Remove course code patterns like (3030113067.01), [3030113067.01], 【3030113067.01】
+        value = value.replaceAll("[\\(（\\[【]\\d{8,}[^)）\\]】]*[\\)）\\]】]", "");
+        // Remove multi-value groups: teacher lists "(吕宪伟,王强)" and week+room "(4-15,工学馆307)".
+        // Any parenthesis group that contains a comma or a digit is metadata, never the course name.
+        value = value.replaceAll("[\\(（][^)）]*[,，\\d][^)）]*[\\)）]", "");
+        // Remove teacher names in parentheses like (张三), (吕宪伟)
+        value = value.replaceAll("[\\(（][\\u4e00-\\u9fa5]{2,4}[\\)）]", "");
+        // Remove trailing incomplete parentheses and garbage
+        value = value.replaceAll("[\\(（\\[【][^)）\\]】]*$", "");
+        value = value.replaceAll("[nrltf\\\\]+$", "");
+        // Remove label prefixes
+        value = value.replaceFirst("^(课程名称|课程名|课程|科目)\\s*[:：]?\\s*", "");
+        // Trim decorators and whitespace
+        value = value.replaceAll("^[·•\\-—\\s]+|[·•\\-—\\s]+$", "").trim();
+        return value;
     }
 
     private static boolean isMetadata(String line) {
@@ -300,8 +387,25 @@ public final class ImportParser {
 
     private static boolean isNoise(String value) {
         String compact = value.replaceAll("\\s", "");
-        return compact.isEmpty() || compact.equals("课表") || compact.equals("课程表")
-                || compact.equals("上午") || compact.equals("下午") || compact.equals("晚上")
-                || compact.matches("^(星期|周)[一二三四五六日]$");
+        if (compact.isEmpty() || compact.equals("课表") || compact.equals("课程表")) return true;
+        if (compact.equals("上午") || compact.equals("下午") || compact.equals("晚上")) return true;
+        if (compact.matches("^(星期|周)[一二三四五六日]$")) return true;
+        // Summary/notes/metadata keywords
+        if (compact.contains("授课小结") || compact.contains("教学小结")) return true;
+        if (compact.contains("课程小结") || compact.contains("备注")) return true;
+        if (compact.contains("授课计划") || compact.contains("教学计划")) return true;
+        if (compact.contains("教学进度") || compact.contains("授课安排")) return true;
+        if (compact.equals("授课信息") || compact.equals("授课") || compact.equals("大课排课")) return true;
+        if (compact.matches("^(实验辅导?老师|辅导教师|助教|监考老师)$")) return true;
+        // UI action words
+        if (compact.matches("^(操作|编辑|删除|查看|详情|添加|修改|保存|取消|确定|提交)$")) return true;
+        // Metadata field labels
+        if (compact.matches("^(代码|编号|序号|课程号|教学班号|上课时间|上课地点)$")) return true;
+        // Empty/placeholder values
+        if (compact.equals("无") || compact.equals("暂无")) return true;
+        if (compact.matches("^[—\\-\\.。,，、]+$")) return true;
+        // Very short text without course-related keywords (likely just names/labels)
+        if (compact.length() <= 4 && !compact.matches(".*[课程学实验设计理论基础导论概论原理技术方法].*")) return true;
+        return false;
     }
 }
