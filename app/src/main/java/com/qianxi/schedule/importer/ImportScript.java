@@ -4,8 +4,11 @@ public final class ImportScript {
     private ImportScript() {}
 
     public static String forAdapter(String adapterId) {
-        // Login and page selection remain under the user's control. Every adapter scans only
-        // the currently visible timetable, avoiding fragile background API assumptions.
+        // NEUQ/NEU fetch the timetable directly through the EAMS/JWAPP API, so they work even when
+        // the portal page itself fails to render (e.g. jQuery missing → bare skeleton). Only the
+        // generic adapter depends on the visible DOM.
+        if (ImportAdapter.NEUQ_EAMS.equals(adapterId)) return NEUQ_EAMS_API;
+        if (ImportAdapter.NEU.equals(adapterId)) return NEU_API;
         return GENERIC_PAGE;
     }
 
@@ -51,6 +54,15 @@ public final class ImportScript {
               text = clean(text);
               if (!(day >= 1 && day <= 7) || !(section >= 1 && section <= 30)
                   || !text || text.length < 2 || /^(无|暂无|--|-)$/.test(text)) return;
+              // Filter out common noise patterns: UI elements, metadata, pure names
+              const compact = text.replace(/\\s/g, '');
+              if (/^(操作|编辑|删除|查看|详情|添加|修改|保存|取消|确定|提交)$/.test(compact)) return;
+              if (/^(实验辅导?老师|辅导教师|助教|监考老师)/.test(compact)) return;
+              if (/^(代码|编号|序号|课程号|教学班号|上课时间|上课地点)$/.test(compact)) return;
+              if (/^(授课小结|教学小结|课程小结|备注|说明|注释)/.test(compact)) return;
+              // Filter single short words that are likely just names or labels
+              if (compact.length <= 4 && !/[\\d()（）]/.test(compact) &&
+                  !/课|程|学|实验|设计|理论|基础|导论|概论|原理|技术|方法/.test(compact)) return;
               const key = day + '|' + section + '|' + endSection + '|' + text;
               if (seen.has(key)) return;
               seen.add(key);
@@ -361,6 +373,318 @@ public final class ImportScript {
           function scanDocument(doc) {
             for (const table of doc.querySelectorAll('table')) scanTable(table);
           }
+
+          // Beangle EAMS ("courseTableForStd") does NOT put the week range in the rendered cell
+          // text — only a compact "第几节" label. The real schedule lives in inline JS at the bottom
+          // of the returned HTML, emitted like this (one activity, bound to every unit it occupies):
+          //   var actTeacherId = "..."; var actTeacherName = "张旭";
+          //   var activity = new TaskActivity(actTeacherId,actTeacherName,
+          //       "课程号(课程名)","高等数学","roomId","综合楼1208","001111111100000000000",null,null);
+          //   index =2*unitCount+2;  table0.activities[index][...] = activity;
+          //   index =2*unitCount+3;  table0.activities[index][...] = activity;   // multi-period span
+          // The grid index is the VARIABLE `index`, not a literal — the real day/unit are in the
+          // `index = day*unitCount + unit` expression (both 0-based). The 7th constructor argument
+          // is a binary week string (position n = week n has class). Parsing this gives the true
+          // weeks, weekday and unit that the rendered table cannot.
+          function extractArgList(html, startIndex) {
+            // startIndex points just after the opening '(' of new TaskActivity(. Walk to the
+            // matching ')', respecting quoted strings so commas/parens inside them don't confuse us.
+            let i = startIndex, depth = 1, quote = '';
+            while (i < html.length && depth > 0) {
+              const ch = html[i];
+              if (quote) {
+                if (ch === '\\\\') { i += 2; continue; }
+                if (ch === quote) quote = '';
+              } else if (ch === '"' || ch === "'") {
+                quote = ch;
+              } else if (ch === '(') {
+                depth++;
+              } else if (ch === ')') {
+                depth--;
+              }
+              i++;
+            }
+            return {argStr: html.slice(startIndex, i - 1), end: i};
+          }
+          function parseTaskActivities(html, unitCount) {
+            const items = [];
+            const uc = unitCount > 0 ? unitCount : 12;
+            const marker = 'new TaskActivity(';
+            let pos = 0;
+            while (true) {
+              const at = html.indexOf(marker, pos);
+              if (at < 0) break;
+              const parsed = extractArgList(html, at + marker.length);
+              const args = splitArgs(parsed.argStr);
+              // Every `index = day*unitCount+unit; table0.activities[index]...` binding for this
+              // activity sits between it and the next `new TaskActivity(` (cap the window so a
+              // trailing activity without a successor cannot run away over the whole document).
+              const next = html.indexOf(marker, parsed.end);
+              const regionEnd = next < 0 ? Math.min(html.length, parsed.end + 4000) : next;
+              const region = html.slice(parsed.end, regionEnd);
+              pos = next < 0 ? html.length : next;
+              if (!args || args.length < 7) continue;
+              const courseName = stripQuotes(args[3]) || stripQuotes(args[2]);
+              const room = stripQuotes(args[5]);
+              const weekBin = stripQuotes(args[6]);
+              const teacher = stripQuotes(args[1]);
+              if (!courseName || !/^[01]+$/.test(weekBin)) continue;
+              const idxRe = /index\\s*=\\s*(\\d+)\\s*\\*\\s*(?:unitCount|\\d+)\\s*\\+\\s*(\\d+)/g;
+              let mm;
+              while ((mm = idxRe.exec(region)) !== null) {
+                const day = Number(mm[1]) + 1;        // 0-based weekday → 1-based (Mon=1)
+                const startUnit = Number(mm[2]) + 1;  // 0-based unit → 1-based node
+                if (day >= 1 && day <= 7 && startUnit >= 1 && startUnit <= 30) {
+                  items.push({courseName, teacher, room, weekBin, day, startUnit});
+                }
+              }
+            }
+            return items;
+          }
+          function splitArgs(str) {
+            // Split a JS argument list on top-level commas, respecting quotes.
+            const out = [];
+            let cur = '', quote = '';
+            for (let i = 0; i < str.length; i++) {
+              const ch = str[i];
+              if (quote) {
+                if (ch === quote && str[i - 1] !== '\\\\') quote = '';
+                cur += ch;
+              } else if (ch === '"' || ch === "'") {
+                quote = ch; cur += ch;
+              } else if (ch === ',') {
+                out.push(cur.trim()); cur = '';
+              } else cur += ch;
+            }
+            if (cur.trim()) out.push(cur.trim());
+            return out;
+          }
+          function stripQuotes(v) {
+            if (v == null) return '';
+            return clean(String(v).replace(/^\\s*["']|["']\\s*$/g, ''));
+          }
+          function weekBinToText(bin) {
+            // beangle's vaildWeeks string is 1-INDEXED: position 0 is a placeholder and is always
+            // '0'; position n (n >= 1) means "week n has class". Pushing `i + 1` was off-by-one and
+            // shifted every course forward one week (e.g. real 1-14 → shown as 2-15). Push `i`.
+            const weeks = [];
+            for (let i = 0; i < bin.length; i++) if (bin[i] === '1') weeks.push(i);
+            if (!weeks.length) return '';
+            const parts = [];
+            let s = weeks[0], p = weeks[0];
+            for (let i = 1; i < weeks.length; i++) {
+              if (weeks[i] === p + 1) { p = weeks[i]; continue; }
+              parts.push(s === p ? '' + s : s + '-' + p);
+              s = weeks[i]; p = weeks[i];
+            }
+            parts.push(s === p ? '' + s : s + '-' + p);
+            return parts.join(',') + '周';
+          }
+          function unitCountOf(html) {
+            const m = html.match(/unitCount\\s*=\\s*(\\d+)/);
+            return m ? Number(m[1]) : 0;
+          }
+          function emitActivities(activities) {
+            // Adjacent units of the same course/week/day are one multi-period class; merge them
+            // into a section..endSection range so a 2-node lecture shows as one tall card.
+            const byKey = {};
+            for (const a of activities) {
+              const key = [a.courseName, a.teacher, a.room, a.weekBin, a.day].join('\\u0000');
+              (byKey[key] || (byKey[key] = [])).push(a);
+            }
+            for (const key of Object.keys(byKey)) {
+              const group = byKey[key].sort((x, y) => x.startUnit - y.startUnit);
+              let run = [group[0]];
+              const flush = () => {
+                const first = run[0], last = run[run.length - 1];
+                const weeks = weekBinToText(first.weekBin);
+                output.push({
+                  day: first.day,
+                  section: first.startUnit,
+                  endSection: last.startUnit,
+                  name: first.courseName,
+                  teacher: first.teacher,
+                  location: first.room,
+                  weeks: weeks,
+                  text: [first.courseName, first.teacher, first.room, weeks].filter(Boolean).join('\\n'),
+                  title: first.courseName
+                });
+              };
+              for (let i = 1; i < group.length; i++) {
+                if (group[i].startUnit === run[run.length - 1].startUnit + 1) run.push(group[i]);
+                else { flush(); run = [group[i]]; }
+              }
+              flush();
+            }
+          }
+          // The real fix for the "courseName+\\"" / "actTeacherName.join(',')" symptom: NEUQ's
+          // `new TaskActivity(...)` is called with JS EXPRESSIONS (variables, string concatenation,
+          // .join()), not literals — the constructor source text can never resolve them, only a JS
+          // runtime can. But we don't need to re-execute anything: when the user taps "拉取课表" while
+          // the EAMS timetable page is open in the WebView, its TaskActivity_01.js has already run
+          // and populated `window.table0.activities` with fully evaluated activity objects whose
+          // fields are real strings (courseName, teachers, room, vaildWeeks). Reading those beats
+          // any parse/replay strategy. Same-origin iframes discovered on the page (e.g. an EAMS
+          // sub-frame that hosts the actual timetable) are searched too.
+          //
+          // Beangle's TaskActivity constructor sets fields like:
+          //   this.teacherId, this.teachers, this.courseId, this.courseName,
+          //   this.roomId, this.room, this.vaildWeeks (sic — "vaild", not "valid")
+          // Slots in activities[] are Beangle "OpaqueArray" objects: numeric indices 0..count-1
+          // hold TaskActivity instances, and .count is the occupancy for that unit.
+          function harvestFromWindow(win) {
+            const items = [];
+            let table = null;
+            let unitCount = 0;
+            try { unitCount = Number(win.unitCount) || 0; } catch (e) {}
+            try {
+              for (const k in win) {
+                try {
+                  if (/^table\\d+$/.test(k) && win[k] && win[k].activities) {
+                    table = win[k]; break;
+                  }
+                } catch (e) {}
+              }
+            } catch (e) {}
+            if (!table) {
+              try { if (win.table0 && win.table0.activities) table = win.table0; } catch (e) {}
+            }
+            if (!table || !table.activities) return items;
+            if (!unitCount) unitCount = 12;
+            const acts = table.activities;
+            for (let i = 0; i < acts.length; i++) {
+              const slot = acts[i];
+              if (!slot) continue;
+              const count = typeof slot.count === 'number'
+                ? slot.count : (Array.isArray(slot) ? slot.length : 0);
+              const entries = [];
+              for (let j = 0; j < count; j++) {
+                try { if (slot[j]) entries.push(slot[j]); } catch (e) {}
+              }
+              // Some Beangle builds store activities directly in a flat array without a .count.
+              if (!entries.length && slot && typeof slot === 'object'
+                  && (slot.courseName || slot.__qx)) {
+                entries.push(slot);
+              }
+              for (const a of entries) {
+                if (!a) continue;
+                let courseName = '';
+                let teacher = '';
+                let room = '';
+                let weekBin = '';
+                // First choice: the constructed object's real string fields.
+                try {
+                  courseName = clean(String(a.courseName || a.course || ''));
+                  teacher = clean(String(a.teachers || a.teacherName || a.teacher || ''));
+                  room = clean(String(a.room || a.roomName || ''));
+                  weekBin = String(a.vaildWeeks || a.validWeeks || a.weeks || '');
+                } catch (e) {}
+                // Second choice: our capture shim stored the original arguments on __qx.
+                if ((!courseName || !weekBin) && a.__qx) {
+                  const args = a.__qx;
+                  if (!courseName) {
+                    courseName = clean(String(args[3] != null ? args[3] : ''))
+                      || clean(String(args[2] != null ? args[2] : ''));
+                  }
+                  if (!teacher) teacher = clean(String(args[1] != null ? args[1] : ''));
+                  if (!room) room = clean(String(args[5] != null ? args[5] : ''));
+                  if (!weekBin) weekBin = String(args[6] != null ? args[6] : '');
+                }
+                if (!courseName || !/^[01]+$/.test(weekBin)) continue;
+                const day = Math.floor(i / unitCount) + 1;
+                const startUnit = (i % unitCount) + 1;
+                if (day >= 1 && day <= 7 && startUnit >= 1 && startUnit <= 30) {
+                  items.push({courseName, teacher, room, weekBin, day, startUnit});
+                }
+              }
+            }
+            return items;
+          }
+          function harvestFromCurrentPage() {
+            // Read the live EAMS page the WebView is showing: this is the only place TaskActivity
+            // arguments are already evaluated, no matter how they were written in source.
+            const wins = [window];
+            try {
+              for (const frame of document.querySelectorAll('iframe')) {
+                try { if (frame.contentWindow) wins.push(frame.contentWindow); } catch (e) {}
+              }
+            } catch (e) {}
+            for (const w of wins) {
+              const out = harvestFromWindow(w);
+              if (out.length) return out;
+            }
+            return [];
+          }
+          // Fallback when the user hasn't opened the timetable page: fetch it ourselves and inject
+          // it into a same-origin iframe via document.write. `about:blank` inherits our origin, so
+          // TaskActivity_01.js loads normally, cookies attach, and the inline scripts evaluate.
+          // (srcdoc puts the iframe under an opaque origin — subresource loading and cross-frame
+          // property access misbehave there, which is why the 1.17.2/1.17.3 srcdoc path silently
+          // produced no activities.)
+          function injectCapture(html) {
+            // Belt-and-braces: swap in a TaskActivity shim BEFORE the real one loads, so if any
+            // caller passes literal expressions we still record them for the fallback read path.
+            const cap = '<script>(function(){var R=window.TaskActivity;'
+              + 'function T(){try{if(R)R.apply(this,arguments);}catch(e){}'
+              + 'try{this.__qx=Array.prototype.slice.call(arguments);}catch(e){}return this;}'
+              + 'try{if(R&&R.prototype)T.prototype=R.prototype;}catch(e){}window.TaskActivity=T;})();</script>';
+            const low = html.toLowerCase();
+            let at = low.indexOf('taskactivity_01.js');
+            if (at >= 0) {
+              const close = low.indexOf('</script>', at);
+              if (close >= 0) {
+                const ins = close + 9;
+                return html.slice(0, ins) + cap + html.slice(ins);
+              }
+            }
+            at = html.indexOf('new TaskActivity(');
+            if (at >= 0) {
+              const start = low.lastIndexOf('<script', at);
+              if (start >= 0) return html.slice(0, start) + cap + html.slice(start);
+            }
+            return cap + html;
+          }
+          function renderAndHarvest(html) {
+            return new Promise(resolve => {
+              const frame = document.createElement('iframe');
+              frame.style.cssText =
+                'position:absolute;left:-9999px;top:0;width:1200px;height:2400px;visibility:hidden;';
+              // about:blank inherits the parent's origin — scripts inside see same-origin cookies
+              // and can load TaskActivity_01.js off the EAMS server normally.
+              frame.src = 'about:blank';
+              let finished = false;
+              const finish = () => {
+                if (finished) return;
+                finished = true;
+                let out = [];
+                try { out = harvestFromWindow(frame.contentWindow || {}); } catch (e) {}
+                try { frame.remove(); } catch (e) {}
+                resolve(out);
+              };
+              document.body.appendChild(frame);
+              const write = () => {
+                try {
+                  const doc = frame.contentWindow.document;
+                  const base = '<base href="' + location.origin + '/eams/">';
+                  let payload = injectCapture(html);
+                  payload = /<head[^>]*>/i.test(payload)
+                    ? payload.replace(/<head[^>]*>/i, match => match + base)
+                    : base + payload;
+                  doc.open();
+                  doc.write(payload);
+                  doc.close();
+                } catch (e) {
+                  finish();
+                  return;
+                }
+                // Give TaskActivity_01.js + inline bootstrap time to run.
+                setTimeout(finish, 4000);
+              };
+              // about:blank load is usually synchronous but wait a tick to be safe.
+              setTimeout(write, 60);
+              setTimeout(finish, 12000);
+            });
+          }
           function renderAndScan(html) {
             return new Promise(resolve => {
               const frame = document.createElement('iframe');
@@ -417,8 +741,26 @@ public final class ImportScript {
                 }
               });
               if (isLoginPage(result)) throw new Error('登录状态已失效，请重新登录统一身份认证');
-              scanDocument(documentOf(result.text));
-              if (!output.length) await renderAndScan(result.text);
+
+              // Strategy, in order of fidelity:
+              // 1. Read `table0.activities` from the LIVE page/frames the user has already loaded —
+              //    TaskActivity has run there, so courseName/teachers/room/vaildWeeks are real strings.
+              // 2. Render the fetched HTML in a same-origin about:blank iframe and read the same
+              //    fields — used when the user tapped 拉取 from a non-timetable page.
+              // 3. Text-parse the constructor source (works only for literal-argument deployments).
+              // 4. DOM scan the rendered timetable cells as last resort.
+              const unitCount = unitCountOf(result.text);
+              let activities = harvestFromCurrentPage();
+              if (!activities.length) {
+                try { activities = await renderAndHarvest(result.text); } catch (e) { activities = []; }
+              }
+              if (!activities.length) activities = parseTaskActivities(result.text, unitCount);
+              if (activities.length) {
+                emitActivities(activities);
+              } else {
+                scanDocument(documentOf(result.text));
+                if (!output.length) await renderAndScan(result.text);
+              }
 
               window.__qianxiImportPayload = {
                 adapter: 'neuq-eams',

@@ -57,20 +57,32 @@ public final class ImportAdapterTest {
     }
 
     @Test
-    public void specialAdaptersDoNotRejectCustomHosts() {
-        assertFalse(ImportScript.forAdapter(ImportAdapter.NEU).contains("jwxt\\.neu\\.edu\\.cn$"));
-        assertFalse(ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS)
-                .contains("jwxt\\.neuq\\.edu\\.cn$"));
-        assertFalse(ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS).contains("courseTableForStd"));
+    public void hostDetectionOverridesMismatchedManualPick() {
+        // A NEUQ EAMS URL must resolve to the EAMS adapter even if the user left the dropdown on a
+        // different system (e.g. 青果/kingosoft) — otherwise the generic DOM scan runs on a portal
+        // page that never finished rendering.
+        assertEquals(ImportAdapter.NEUQ_EAMS, ImportAdapter.resolve(ImportAdapter.KINGOSOFT,
+                "https://jwxt.neuq.edu.cn/eams/homeExt.action"));
+        assertEquals(ImportAdapter.NEU, ImportAdapter.resolve(ImportAdapter.ZHENGFANG,
+                "https://jwxt.neu.edu.cn/jwapp/sys/homeapp/index.do"));
     }
 
     @Test
-    public void allAdaptersScanOnlyTheCurrentPage() {
+    public void neuqAdapterUsesEamsApiScript() {
+        // NEUQ must run the EAMS API script (fetches courseTableForStd + parses TaskActivity weeks),
+        // not the generic DOM scanner — the portal page renders as a skeleton without jQuery.
+        String neuq = ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS);
+        assertTrue(neuq.contains("courseTableForStd"));
+        assertTrue(neuq.contains("TaskActivity"));
+    }
+
+    @Test
+    public void adaptersRouteToDistinctScripts() {
         String generic = ImportScript.forAdapter(ImportAdapter.GENERIC);
-        assertEquals(generic, ImportScript.forAdapter(ImportAdapter.NEU));
-        assertEquals(generic, ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS));
-        String script = ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS);
-        assertTrue(script.contains("document.querySelectorAll"));
-        assertFalse(script.contains("fetch("));
+        String neuq = ImportScript.forAdapter(ImportAdapter.NEUQ_EAMS);
+        String neu = ImportScript.forAdapter(ImportAdapter.NEU);
+        assertFalse(generic.equals(neuq));
+        assertFalse(generic.equals(neu));
+        assertTrue(generic.contains("document.querySelectorAll"));
     }
 }

@@ -17,6 +17,7 @@ import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -29,6 +30,8 @@ import com.qianxi.schedule.silence.AlarmScheduler;
 import com.qianxi.schedule.silence.SilenceState;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -39,6 +42,7 @@ import java.util.Locale;
 public final class SettingsActivity extends Activity {
     private static final int REQUEST_EXPORT_BACKUP = 41;
     private static final int REQUEST_IMPORT_BACKUP = 42;
+    private static final int REQUEST_PICK_BACKGROUND = 43;
     private AppSettings settings;
     private Switch autoSilent;
     private TextView permissionStatus;
@@ -115,6 +119,81 @@ public final class SettingsActivity extends Activity {
         semesterRow.addView(semesterValue, new LinearLayout.LayoutParams(Ui.dp(this, 110), Ui.dp(this, 60)));
         semesterRow.setOnClickListener(v -> pickSemesterDate());
         content.addView(semesterRow);
+
+        LinearLayout classTimeRow = row();
+        classTimeRow.addView(labels("上课时间", "自定义每节课的开始和结束时间"),
+                new LinearLayout.LayoutParams(0, Ui.dp(this, 70), 1));
+        Button editTimes = Ui.textButton(this, "编辑");
+        editTimes.setOnClickListener(v -> startActivity(new Intent(this, ClassTimesActivity.class)));
+        classTimeRow.addView(editTimes, new LinearLayout.LayoutParams(Ui.dp(this, 72), Ui.dp(this, 52)));
+        content.addView(classTimeRow);
+
+        // Semester length slider (10–30 weeks, default 20): once the real current week passes this
+        // count, the main screen's "next class" card switches to "本学期已结束".
+        LinearLayout totalWeeksRow = new LinearLayout(this);
+        totalWeeksRow.setOrientation(LinearLayout.VERTICAL);
+        totalWeeksRow.setPadding(Ui.dp(this, 20), Ui.dp(this, 8), Ui.dp(this, 20), Ui.dp(this, 4));
+        totalWeeksRow.setBackgroundColor(Color.WHITE);
+        TextView totalWeeksLabel = Ui.text(this, "", 15, Ui.INK);
+        totalWeeksLabel.setText("学期长度  " + settings.totalWeeks() + " 周");
+        totalWeeksRow.addView(totalWeeksLabel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 30)));
+        SeekBar totalWeeksBar = new SeekBar(this);
+        totalWeeksBar.setMax(20); // maps 0..20 → 10..30 weeks
+        totalWeeksBar.setProgress(settings.totalWeeks() - 10);
+        totalWeeksBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                int weeks = 10 + progress;
+                totalWeeksLabel.setText("学期长度  " + weeks + " 周");
+                if (fromUser) settings.setTotalWeeks(weeks);
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+            @Override public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        totalWeeksRow.addView(totalWeeksBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.addView(totalWeeksRow);
+        content.addView(Ui.divider(this));
+
+        content.addView(Ui.sectionTitle(this, "显示"));
+        // Grid row height slider (WakeUp-style): 40–80dp, live value read-back.
+        LinearLayout heightRow = new LinearLayout(this);
+        heightRow.setOrientation(LinearLayout.VERTICAL);
+        heightRow.setPadding(Ui.dp(this, 20), Ui.dp(this, 8), Ui.dp(this, 20), Ui.dp(this, 4));
+        heightRow.setBackgroundColor(Color.WHITE);
+        TextView heightLabel = Ui.text(this, "", 15, Ui.INK);
+        heightLabel.setText("课表格子高度  " + settings.itemHeightDp() + " dp");
+        heightRow.addView(heightLabel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 30)));
+        SeekBar heightBar = new SeekBar(this);
+        heightBar.setMax(40); // maps 0..40 → 40..80 dp
+        heightBar.setProgress(settings.itemHeightDp() - 40);
+        heightBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                int dp = 40 + progress;
+                heightLabel.setText("课表格子高度  " + dp + " dp");
+                if (fromUser) settings.setItemHeightDp(dp);
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+            @Override public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        heightRow.addView(heightBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.addView(heightRow);
+
+        LinearLayout bgRow = row();
+        bgRow.addView(labels("课表背景图片", "从相册选择一张图片作为课表背景"),
+                new LinearLayout.LayoutParams(0, Ui.dp(this, 70), 1));
+        Button pickBg = Ui.textButton(this, "选择");
+        pickBg.setOnClickListener(v -> pickBackground());
+        Button clearBg = Ui.textButton(this, "清除");
+        clearBg.setOnClickListener(v -> {
+            settings.setBackgroundPath("");
+            Toast.makeText(this, "已恢复默认背景", Toast.LENGTH_SHORT).show();
+        });
+        bgRow.addView(pickBg, new LinearLayout.LayoutParams(Ui.dp(this, 60), Ui.dp(this, 52)));
+        bgRow.addView(clearBg, new LinearLayout.LayoutParams(Ui.dp(this, 60), Ui.dp(this, 52)));
+        content.addView(bgRow);
         content.addView(Ui.divider(this));
 
         content.addView(Ui.sectionTitle(this, "教务登录"));
@@ -146,7 +225,7 @@ public final class SettingsActivity extends Activity {
         content.addView(Ui.divider(this));
 
         content.addView(Ui.sectionTitle(this, "关于"));
-        LinearLayout about = labels("潜溪课表 1.5.0", "课程数据与教务页面只在本机处理 · MIT License");
+        LinearLayout about = labels("潜溪课表 " + appVersion(), "课程数据与教务页面只在本机处理 · MIT License");
         about.setPadding(Ui.dp(this, 20), 0, Ui.dp(this, 20), 0);
         content.addView(about, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 70)));
@@ -155,6 +234,14 @@ public final class SettingsActivity extends Activity {
         root.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         return root;
+    }
+
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception exception) {
+            return "";
+        }
     }
 
     private LinearLayout row() {
@@ -244,6 +331,43 @@ public final class SettingsActivity extends Activity {
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         if (requestCode == REQUEST_EXPORT_BACKUP) writeBackup(data.getData());
         else if (requestCode == REQUEST_IMPORT_BACKUP) readBackup(data.getData());
+        else if (requestCode == REQUEST_PICK_BACKGROUND) copyBackground(data.getData());
+    }
+
+    private void pickBackground() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.setType("image/*");
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            startActivityForResult(intent, REQUEST_PICK_BACKGROUND);
+        } catch (Exception exception) {
+            Toast.makeText(this, "系统不支持选择图片", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * Copies the chosen image into app-private storage (filesDir/background.img). SAF content URIs
+     * lose their grant across restarts, so a local copy keeps the background working long-term.
+     */
+    private void copyBackground(Uri uri) {
+        File target = new File(getFilesDir(), "background.img");
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             FileOutputStream output = new FileOutputStream(target)) {
+            if (input == null) throw new java.io.IOException("无法读取所选图片");
+            byte[] chunk = new byte[8192];
+            int total = 0;
+            int count;
+            while ((count = input.read(chunk)) != -1) {
+                total += count;
+                if (total > 12 * 1024 * 1024) throw new java.io.IOException("图片过大（超过 12MB）");
+                output.write(chunk, 0, count);
+            }
+            output.flush();
+            settings.setBackgroundPath(target.getAbsolutePath());
+            Toast.makeText(this, "背景已设置", Toast.LENGTH_SHORT).show();
+        } catch (Exception exception) {
+            Toast.makeText(this, "设置背景失败：" + exception.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     private void writeBackup(Uri uri) {

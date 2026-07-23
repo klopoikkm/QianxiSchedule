@@ -72,11 +72,12 @@ public final class ImportAdapter {
 
     public static String resolve(String selectedId, String url) {
         String detected = detect(url);
+        // A confident host/path match for an API-backed system (NEU JWAPP, NEUQ EAMS) wins even over
+        // a mismatched manual pick: those adapters fetch the timetable directly, so running a generic
+        // DOM scan on such a site (e.g. because the dropdown still said 青果/kingosoft) would only
+        // scrape a half-rendered portal. Auto also defers to detection.
         if (AUTO.equals(selectedId)) return detected;
-        if ((NEU.equals(selectedId) || NEUQ_EAMS.equals(selectedId))
-                && NEUQ_EAMS.equals(detected)) {
-            return NEUQ_EAMS;
-        }
+        if (NEUQ_EAMS.equals(detected) || NEU.equals(detected)) return detected;
         return NEUQ_EAMS.equals(selectedId) ? NEU : selectedId;
     }
 

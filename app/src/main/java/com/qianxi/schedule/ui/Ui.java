@@ -120,7 +120,7 @@ public final class Ui {
     public static TextView sectionTitle(Context context, String label) {
         TextView title = text(context, label, 13, MUTED);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        title.setPadding(dp(context, 20), dp(context, 18), dp(context, 20), dp(context, 7));
+        title.setPadding(dp(context, 16), dp(context, 12), dp(context, 16), dp(context, 5));
         return title;
     }
 }

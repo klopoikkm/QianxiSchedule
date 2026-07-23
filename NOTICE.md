@@ -15,3 +15,7 @@ structure was cross-checked against the public
 [TsiaohanWang/neuq-jwxt-rs](https://github.com/TsiaohanWang/neuq-jwxt-rs)
 implementation. The Android/WebView adapter is independently implemented and
 does not collect or transmit the user's EAMS password.
+
+The app bundles jQuery 1.7.2 (MIT License) as a compatibility fallback for
+legacy EAMS pages whose remote jQuery resource cannot be loaded by Android
+WebView. Copyright 2012 jQuery Foundation and other contributors.

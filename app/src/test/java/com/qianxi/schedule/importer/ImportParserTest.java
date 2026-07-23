@@ -81,6 +81,64 @@ public final class ImportParserTest {
     }
 
     @Test
+    public void extractsMultipleTeachersAndRoomFromEamsString() throws Exception {
+        String payload = "{\"items\":[{\"day\":4,\"section\":5,\"endSection\":6,\"text\":"
+                + "\"人工智能导论(3030113067.01)(吕宪伟,王强)(4-15,工学馆307)\"}]}";
+        List<Course> courses = ImportParser.parseJavascriptResult(
+                JSONObject.quote(payload), ImportAdapter.GENERIC);
+
+        assertEquals(1, courses.size());
+        Course course = courses.get(0);
+        assertEquals("人工智能导论", course.name);
+        assertEquals("吕宪伟,王强", course.teacher);
+        assertEquals("工学馆307", course.location);
+    }
+
+    @Test
+    public void populatesStartNodeAndStepFromSections() throws Exception {
+        String payload = "{\"adapter\":\"neu\",\"items\":[{\"name\":\"大学物理\",\"day\":2,"
+                + "\"section\":3,\"endSection\":5,\"weeks\":\"1-8周\"}]}";
+        List<Course> courses = ImportParser.parseJavascriptResult(
+                JSONObject.quote(payload), ImportAdapter.NEU);
+
+        assertEquals(1, courses.size());
+        Course course = courses.get(0);
+        assertEquals(3, course.startNode);
+        assertEquals(3, course.step);
+        assertEquals(5, course.endNode());
+    }
+
+    @Test
+    public void parsesBinaryWeekString() {
+        // "0111111110" → weeks 2..9 (bit n = week n+1).
+        long mask = ImportParser.extractWeeks("0111111110");
+        assertEquals(0L, mask & 1L);              // week 1 off
+        assertTrue((mask & (1L << 1)) != 0);      // week 2 on
+        assertTrue((mask & (1L << 8)) != 0);      // week 9 on
+        assertEquals(0L, mask & (1L << 9));       // week 10 off
+    }
+
+    @Test
+    public void importsCourseWithBinaryWeeksField() throws Exception {
+        String payload = "{\"items\":[{\"name\":\"汇编语言程序设计\",\"teacher\":\"张旭\","
+                + "\"location\":\"综合楼1208\",\"day\":3,\"section\":3,\"endSection\":4,"
+                + "\"weeks\":\"0111111111000000000\"}]}";
+        List<Course> courses = ImportParser.parseJavascriptResult(
+                JSONObject.quote(payload), ImportAdapter.NEUQ_EAMS);
+
+        assertEquals(1, courses.size());
+        Course course = courses.get(0);
+        assertEquals("汇编语言程序设计", course.name);
+        assertEquals("综合楼1208", course.location);
+        assertEquals(2, course.startWeek);
+        assertEquals(10, course.endWeek);
+        assertTrue(!course.occursInWeek(1));
+        assertTrue(course.occursInWeek(2));
+        assertTrue(course.occursInWeek(10));
+        assertTrue(!course.occursInWeek(11));
+    }
+
+    @Test
     public void parsesCompactApiClock() {
         assertEquals(8 * 60 + 30, ImportParser.parseClock("083000"));
         assertEquals(21 * 60 + 25, ImportParser.parseClock("21:25"));
