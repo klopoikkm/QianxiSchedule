@@ -9,6 +9,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -25,6 +26,7 @@ public final class ClassTimesActivity extends Activity {
     private AppSettings settings;
     private List<AppSettings.ClassTime> classTimes;
     private LinearLayout timesContainer;
+    private LinearLayout tableRow;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -65,6 +67,12 @@ public final class ClassTimesActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(Ui.dp(this, 12), Ui.dp(this, 8), Ui.dp(this, 12), Ui.dp(this, 8));
 
+        tableRow = new LinearLayout(this);
+        tableRow.setOrientation(LinearLayout.HORIZONTAL);
+        tableRow.setGravity(Gravity.CENTER_VERTICAL);
+        content.addView(tableRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         TextView hint = Ui.text(this, "点击时间修改，长按删除节次", 13, Ui.MUTED);
         hint.setPadding(Ui.dp(this, 8), Ui.dp(this, 5), Ui.dp(this, 8), Ui.dp(this, 10));
         content.addView(hint);
@@ -91,8 +99,130 @@ public final class ClassTimesActivity extends Activity {
         root.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
+        refreshTableRow();
         refreshTimesList();
         return root;
+    }
+
+    /**
+     * Shows which 作息 table is active plus a switch button. Several tables are useful when a
+     * student's schools/terms use different period timings; the active one drives the grid, the
+     * course editor and section-based import alike.
+     */
+    private void refreshTableRow() {
+        tableRow.removeAllViews();
+        String name = "默认作息";
+        for (AppSettings.ClassTimeTable table : settings.classTimeTables()) {
+            if (table.id.equals(settings.currentClassTimeTableId())) {
+                name = table.name;
+                break;
+            }
+        }
+        TextView current = Ui.text(this, "当前：" + name, 14, Ui.INK);
+        current.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), Ui.dp(this, 8), Ui.dp(this, 6));
+        tableRow.addView(current, new LinearLayout.LayoutParams(0, Ui.dp(this, 40), 1));
+
+        Button switchTable = Ui.textButton(this, "切换作息");
+        switchTable.setOnClickListener(v -> showTableChooser());
+        tableRow.addView(switchTable, new LinearLayout.LayoutParams(
+                Ui.dp(this, 96), Ui.dp(this, 40)));
+    }
+
+    /**
+     * Lists the saved 作息 tables so one can be activated, plus entries to create and delete.
+     * Switching discards unsaved edits, so ask first when the list has been touched.
+     */
+    private void showTableChooser() {
+        List<AppSettings.ClassTimeTable> tables = settings.classTimeTables();
+        List<String> labels = new ArrayList<>();
+        String current = settings.currentClassTimeTableId();
+        for (AppSettings.ClassTimeTable table : tables) {
+            labels.add(String.format(Locale.CHINA, "%s（%d 节）%s",
+                    table.name, table.times.size(), table.id.equals(current) ? " ·当前" : ""));
+        }
+        labels.add("+ 新建作息");
+        if (tables.size() > 1) labels.add("删除当前作息");
+
+        new AlertDialog.Builder(this)
+                .setTitle("作息表")
+                .setItems(labels.toArray(new String[0]), (d, which) -> {
+                    if (which < tables.size()) {
+                        activateTable(tables.get(which).id);
+                    } else if (which == tables.size()) {
+                        createTable();
+                    } else {
+                        deleteCurrentTable();
+                    }
+                })
+                .show();
+    }
+
+    private void activateTable(String id) {
+        if (id.equals(settings.currentClassTimeTableId())) return;
+        Runnable apply = () -> {
+            settings.setCurrentClassTimeTableId(id);
+            classTimes = new ArrayList<>(settings.classTimes());
+            refreshTableRow();
+            refreshTimesList();
+        };
+        if (!hasUnsavedEdits()) {
+            apply.run();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("切换作息")
+                .setMessage("当前作息有未保存的修改，切换后会丢失。继续？")
+                .setPositiveButton("继续", (d, w) -> apply.run())
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void createTable() {
+        EditText input = new EditText(this);
+        input.setHint("例如 夏季作息");
+        new AlertDialog.Builder(this)
+                .setTitle("新建作息")
+                .setView(input)
+                .setPositiveButton("创建", (d, w) -> {
+                    AppSettings.ClassTimeTable created =
+                            settings.createClassTimeTable(input.getText().toString());
+                    classTimes = new ArrayList<>(settings.classTimes());
+                    refreshTableRow();
+                    refreshTimesList();
+                    Toast.makeText(this, "已创建并切换到" + created.name, Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void deleteCurrentTable() {
+        String id = settings.currentClassTimeTableId();
+        new AlertDialog.Builder(this)
+                .setTitle("删除作息")
+                .setMessage("删除当前作息表？已按此作息保存的课程时间不会改变。")
+                .setPositiveButton("删除", (d, w) -> {
+                    settings.deleteClassTimeTable(id);
+                    classTimes = new ArrayList<>(settings.classTimes());
+                    refreshTableRow();
+                    refreshTimesList();
+                    Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private boolean hasUnsavedEdits() {
+        List<AppSettings.ClassTime> saved = settings.classTimes();
+        if (saved.size() != classTimes.size()) return true;
+        for (int i = 0; i < saved.size(); i++) {
+            AppSettings.ClassTime a = saved.get(i);
+            AppSettings.ClassTime b = classTimes.get(i);
+            if (a.period != b.period || a.startMinute != b.startMinute
+                    || a.endMinute != b.endMinute) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void refreshTimesList() {

@@ -1,5 +1,6 @@
 package com.qianxi.schedule.importer;
 
+import com.qianxi.schedule.data.AppSettings;
 import com.qianxi.schedule.data.Course;
 
 import org.json.JSONArray;
@@ -20,16 +21,6 @@ public final class ImportParser {
             14 * 60, 14 * 60 + 55, 16 * 60, 16 * 60 + 55,
             19 * 60, 19 * 60 + 55, 20 * 60 + 50, 21 * 60 + 45
     };
-    private static final int[] NEU_START_TIMES = {
-            8 * 60 + 30, 9 * 60 + 25, 10 * 60 + 30, 11 * 60 + 25,
-            14 * 60, 14 * 60 + 55, 16 * 60, 16 * 60 + 55,
-            18 * 60 + 30, 19 * 60 + 25, 20 * 60 + 30, 21 * 60 + 25
-    };
-    private static final int[] NEU_END_TIMES = {
-            9 * 60 + 15, 10 * 60 + 10, 11 * 60 + 15, 12 * 60 + 10,
-            14 * 60 + 45, 15 * 60 + 40, 16 * 60 + 45, 17 * 60 + 40,
-            19 * 60 + 15, 20 * 60 + 10, 21 * 60 + 15, 22 * 60 + 10
-    };
     private static final int[] COLORS = {
             0xFF087F5B, 0xFF1971C2, 0xFF6741D9, 0xFFC2255C,
             0xFFE8590C, 0xFF5F6F52, 0xFF0B7285, 0xFF495057
@@ -38,6 +29,7 @@ public final class ImportParser {
     public static final class ImportOutcome {
         public final List<Course> courses;
         public final String adapterId;
+        public final String layout;
         public final String source;
         public final String sourceUrl;
         public final String pageTitle;
@@ -46,14 +38,28 @@ public final class ImportParser {
         public final int rawItems;
         public final int skippedItems;
         public final int frames;
+        public final int shadowRoots;
         public final int tables;
         public final int candidates;
+        public final int missingWeekCandidates;
+        public final int runtimeActivities;
+        public final int recordRows;
+        public final int visualCandidates;
+        public final int visualDays;
+        public final int visualSections;
+        public final int visualNodes;
+        public final List<String> candidateSamples;
+        public final List<String> fingerprints;
 
-        ImportOutcome(List<Course> courses, String adapterId, String source, String sourceUrl,
+        ImportOutcome(List<Course> courses, String adapterId, String layout, String source, String sourceUrl,
                       String pageTitle, String term, String campus, int rawItems, int skippedItems,
-                      int frames, int tables, int candidates) {
+                      int frames, int shadowRoots, int tables, int candidates,
+                      int missingWeekCandidates, int runtimeActivities,
+                      int recordRows, int visualCandidates, int visualDays, int visualSections, int visualNodes,
+                      List<String> candidateSamples, List<String> fingerprints) {
             this.courses = courses;
             this.adapterId = adapterId;
+            this.layout = layout;
             this.source = source;
             this.sourceUrl = sourceUrl;
             this.pageTitle = pageTitle;
@@ -62,32 +68,58 @@ public final class ImportParser {
             this.rawItems = rawItems;
             this.skippedItems = skippedItems;
             this.frames = frames;
+            this.shadowRoots = shadowRoots;
             this.tables = tables;
             this.candidates = candidates;
+            this.missingWeekCandidates = missingWeekCandidates;
+            this.runtimeActivities = runtimeActivities;
+            this.recordRows = recordRows;
+            this.visualCandidates = visualCandidates;
+            this.visualDays = visualDays;
+            this.visualSections = visualSections;
+            this.visualNodes = visualNodes;
+            this.candidateSamples = candidateSamples;
+            this.fingerprints = fingerprints;
         }
     }
 
     private ImportParser() {}
 
     public static List<Course> parseJavascriptResult(String callbackValue, String selectedAdapter) throws Exception {
-        return parseOutcome(callbackValue, selectedAdapter).courses;
+        return parseOutcome(callbackValue, selectedAdapter, null).courses;
     }
 
     public static ImportOutcome parseOutcome(String callbackValue, String selectedAdapter) throws Exception {
+        return parseOutcome(callbackValue, selectedAdapter, null);
+    }
+
+    /**
+     * Parses the scanner payload into courses. When {@code classTimes} is supplied (the user's
+     * configured 作息), section-based courses derive their start/end minutes from that table so the
+     * imported alarm time matches exactly where the grid draws the course. An explicit clock in
+     * the page always wins. A null table falls back to the
+     * built-in default schedule (used by unit tests and the pre-作息 import path).
+     */
+    public static ImportOutcome parseOutcome(String callbackValue, String selectedAdapter,
+                                             List<AppSettings.ClassTime> classTimes) throws Exception {
         Object decoded = new JSONTokener(callbackValue).nextValue();
         String payload = decoded instanceof String ? (String) decoded : callbackValue;
         JSONObject root = new JSONObject(payload);
         JSONArray items = root.optJSONArray("items");
         if (items == null) throw new IllegalArgumentException("课表页面没有返回可解析的数据");
 
-        String reportedAdapter = root.optString("adapter", selectedAdapter);
-        String adapter = ImportAdapter.GENERIC.equals(reportedAdapter)
-                && !ImportAdapter.AUTO.equals(selectedAdapter) ? selectedAdapter : reportedAdapter;
+        String reportedAdapter = ImportAdapter.migrateLegacyId(root.optString("adapter", ""));
+        selectedAdapter = ImportAdapter.migrateLegacyId(selectedAdapter);
+        String adapter = reportedAdapter.isEmpty() || ImportAdapter.AUTO.equals(reportedAdapter)
+                ? selectedAdapter : reportedAdapter;
+        if (adapter == null || adapter.isEmpty() || ImportAdapter.AUTO.equals(adapter)) {
+            adapter = ImportAdapter.GENERIC;
+        }
         Map<String, Course> merged = new LinkedHashMap<>();
         int skipped = 0;
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.optJSONObject(i);
-            Course course = item == null ? null : parseItem(item, adapter);
+            Course course = item == null ? null : parseItem(item, adapter, classTimes);
             if (course == null) {
                 skipped++;
                 continue;
@@ -95,16 +127,52 @@ public final class ImportParser {
             mergeCourse(merged, course);
         }
         JSONObject diagnostics = root.optJSONObject("diagnostics");
+        List<String> samples = new ArrayList<>();
+        JSONArray sampleArray = diagnostics == null ? null : diagnostics.optJSONArray("samples");
+        if (sampleArray != null) {
+            for (int i = 0; i < sampleArray.length() && samples.size() < 3; i++) {
+                String sample = normalize(sampleArray.optString(i, ""));
+                if (!sample.isEmpty()) samples.add(sample);
+            }
+        }
+        List<String> fingerprints = new ArrayList<>();
+        JSONArray fingerprintArray = diagnostics == null ? null : diagnostics.optJSONArray("fingerprints");
+        if (fingerprintArray != null) {
+            for (int i = 0; i < fingerprintArray.length() && fingerprints.size() < 5; i++) {
+                JSONObject item = fingerprintArray.optJSONObject(i);
+                if (item == null) continue;
+                String id = normalize(item.optString("id", ""));
+                if (id.isEmpty()) continue;
+                StringBuilder summary = new StringBuilder(id)
+                        .append(" (").append(item.optInt("score", 0)).append(')');
+                JSONArray evidence = item.optJSONArray("evidence");
+                if (evidence != null && evidence.length() > 0) {
+                    summary.append(": ").append(normalize(evidence.optString(0, "")));
+                }
+                fingerprints.add(summary.toString());
+            }
+        }
         return new ImportOutcome(new ArrayList<>(merged.values()), adapter,
+                root.optString("layout", "generic"),
                 root.optString("source", "page-dom"), root.optString("sourceUrl", ""),
                 root.optString("pageTitle", ""), root.optString("term", ""),
                 root.optString("campus", ""), items.length(), skipped,
                 diagnostics == null ? 0 : diagnostics.optInt("frames", 0),
+                diagnostics == null ? 0 : diagnostics.optInt("shadowRoots", 0),
                 diagnostics == null ? 0 : diagnostics.optInt("tables", 0),
-                diagnostics == null ? items.length() : diagnostics.optInt("candidates", items.length()));
+                diagnostics == null ? items.length() : diagnostics.optInt("candidates", items.length()),
+                diagnostics == null ? 0 : diagnostics.optInt("missingWeekCandidates", 0),
+                diagnostics == null ? 0 : diagnostics.optInt("runtimeActivities", 0),
+                diagnostics == null ? 0 : diagnostics.optInt("recordRows", 0),
+                diagnostics == null ? 0 : diagnostics.optInt("visualCandidates", 0),
+                diagnostics == null ? 0 : diagnostics.optInt("visualDays", 0),
+                diagnostics == null ? 0 : diagnostics.optInt("visualSections", 0),
+                diagnostics == null ? 0 : diagnostics.optInt("visualNodes", 0),
+                samples, fingerprints);
     }
 
-    private static Course parseItem(JSONObject item, String adapter) {
+    private static Course parseItem(JSONObject item, String adapter,
+                                    List<AppSettings.ClassTime> classTimes) {
         String text = normalize(item.optString("text", ""));
         String title = normalize(item.optString("title", ""));
         if (text.isEmpty()) text = title;
@@ -117,6 +185,9 @@ public final class ImportParser {
         Course course = new Course();
         course.dayOfWeek = day;
         course.name = normalize(item.optString("name", ""));
+        // A structured "name" field comes from the page's own data model, so it is trusted as a
+        // course title; a name recovered from cell text is a guess and gets the stricter checks.
+        boolean nameWasExplicit = !course.name.isEmpty();
         if (course.name.isEmpty()) course.name = extractName(text);
 
         course.teacher = normalize(item.optString("teacher", ""));
@@ -130,7 +201,7 @@ public final class ImportParser {
         if (course.location.isEmpty()) course.location = extractRoom(source);
 
         course.name = cleanupName(course.name);
-        if (course.name.isEmpty() || isNoise(course.name)) return null;
+        if (course.name.isEmpty() || isNoise(course.name, nameWasExplicit)) return null;
 
         if (course.teacher.isEmpty()) {
             course.teacher = extractLabeled(text, "(?:任课)?教师|老师|授课教师|主讲教师");
@@ -145,8 +216,8 @@ public final class ImportParser {
             course.startMinute = explicitRange[0];
             course.endMinute = explicitRange[1];
         } else {
-            course.startMinute = startForSection(sectionRange[0], adapter);
-            course.endMinute = endForSection(sectionRange[1], adapter);
+            course.startMinute = startForSection(sectionRange[0], classTimes);
+            course.endMinute = endForSection(sectionRange[1], classTimes);
         }
         if (course.endMinute <= course.startMinute) return null;
         // Period-grid position comes straight from the section range so the grid does not have to
@@ -161,8 +232,9 @@ public final class ImportParser {
             course.startWeek = firstWeek(weekMask);
             course.endWeek = lastWeek(weekMask);
         } else {
-            course.startWeek = 1;
-            course.endWeek = 20;
+            // Missing weeks do not mean "the whole semester". Silently turning them into 1-20
+            // creates classes on weeks where they never occur.
+            return null;
         }
         course.color = COLORS[Math.floorMod(course.name.hashCode(), COLORS.length)];
         return course;
@@ -216,10 +288,40 @@ public final class ImportParser {
     }
 
     private static int[] extractSections(String text, int fallbackStart, int fallbackEnd) {
-        Matcher matcher = Pattern.compile("(?:第)?(\\d{1,2})\\s*[-~至—]?\\s*(\\d{0,2})\\s*节").matcher(text);
-        if (!matcher.find()) return new int[]{fallbackStart, fallbackEnd};
+        // A timetable cell often contains "2节/周" or "3节/周", meaning weekly workload rather
+        // than period number. The DOM scanner already knows the row, so only explicit "第x节" or
+        // an actual x-y range may override it.
+        // "第2大节" (强智/青果 style): one 大节 is two consecutive periods, so 大节 n covers 2n-1..2n.
+        Matcher big = Pattern.compile("第\\s*(\\d{1,2})\\s*大节").matcher(text);
+        if (big.find()) {
+            int index = integer(big.group(1), 0);
+            if (index >= 1) return new int[]{index * 2 - 1, index * 2};
+        }
+        // "第1,2节" / "第3、4节": an explicit list, so take its span rather than only the first value.
+        Matcher list = Pattern.compile("第\\s*((?:\\d{1,2}\\s*[,，、]\\s*)+\\d{1,2})\\s*节(?!\\s*/\\s*周)")
+                .matcher(text);
+        if (list.find()) {
+            int low = Integer.MAX_VALUE;
+            int high = 0;
+            Matcher values = Pattern.compile("\\d{1,2}").matcher(list.group(1));
+            while (values.find()) {
+                int value = integer(values.group(), 0);
+                if (value < 1) continue;
+                low = Math.min(low, value);
+                high = Math.max(high, value);
+            }
+            if (high >= 1) return new int[]{low, high};
+        }
+        Matcher matcher = Pattern.compile("第\\s*(\\d{1,2})\\s*(?:[-~至—]\\s*(\\d{1,2}))?\\s*节(?!\\s*/\\s*周)")
+                .matcher(text);
+        if (!matcher.find()) {
+            matcher = Pattern.compile("(?:^|[\\s（(])\\s*(\\d{1,2})\\s*[-~至—]\\s*(\\d{1,2})\\s*节(?!\\s*/\\s*周)")
+                    .matcher(text);
+            if (!matcher.find()) return new int[]{fallbackStart, fallbackEnd};
+        }
         int first = integer(matcher.group(1), fallbackStart);
-        int last = matcher.group(2).isEmpty() ? first : integer(matcher.group(2), first);
+        int last = matcher.group(2) == null || matcher.group(2).isEmpty()
+                ? first : integer(matcher.group(2), first);
         return new int[]{Math.max(1, first), Math.max(first, last)};
     }
 
@@ -236,9 +338,27 @@ public final class ImportParser {
         }
         Matcher area = Pattern.compile("((?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?\\s*[,，、]?\\s*)+)周(?:\\s*[（(]?(单|双)周?[）)]?)?")
                 .matcher(text);
-        if (!area.find()) return 0L;
-        String values = area.group(1);
-        String parity = area.group(2) == null ? "" : area.group(2);
+        String values;
+        String parity;
+        int matchStart;
+        if (area.find()) {
+            values = area.group(1);
+            parity = area.group(2) == null ? "" : area.group(2);
+            matchStart = area.start();
+        } else {
+            // Classic EAMS abbreviates weeks as "(4-15,工学馆307)" without a 周 suffix.
+            // Requiring a comma after 1-2 digit ranges avoids matching course codes.
+            Matcher compact = Pattern.compile(
+                    "[（(]\\s*((?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?)"
+                            + "(?:\\s*[,，、]\\s*(?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?))*)"
+                            + "\\s*(单|双)?\\s*[,，]")
+                    .matcher(text == null ? "" : text);
+            if (!compact.find()) return 0L;
+            values = compact.group(1);
+            parity = compact.group(2) == null ? "" : compact.group(2);
+            matchStart = compact.start();
+        }
+        if (parity.isEmpty()) parity = leadingParity(text, matchStart);
         long mask = 0L;
         Matcher numbers = Pattern.compile("(\\d{1,2})(?:\\s*[-~至—]\\s*(\\d{1,2}))?").matcher(values);
         while (numbers.find()) {
@@ -252,6 +372,16 @@ public final class ImportParser {
         return mask;
     }
 
+    /**
+     * Some systems put the parity before the range instead of after it — "单周1-16", "双周 2-16周",
+     * "单 3-15周". Looks at the text immediately preceding the matched week list for that marker.
+     */
+    private static String leadingParity(String text, int weekStart) {
+        String prefix = text.substring(0, Math.max(0, weekStart));
+        Matcher matcher = Pattern.compile("(单|双)\\s*周?\\s*[（(]?\\s*$").matcher(prefix);
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
     private static String ensureWeekSuffix(String value) {
         // A binary week string is parsed as-is by extractWeeks; don't append 周 (it would break it).
         String trimmed = value == null ? "" : value.trim();
@@ -259,17 +389,43 @@ public final class ImportParser {
         return value.contains("周") ? value : value + "周";
     }
 
-    private static int startForSection(int section, String adapter) {
-        int[] times = ImportAdapter.NEU.equals(adapter) ? NEU_START_TIMES : DEFAULT_START_TIMES;
-        if (section >= 1 && section <= times.length) return times[section - 1];
+    /**
+     * Start minute of a 1-based period. The user's own class-time table wins for every school.
+     * Missing slots retain the built-in fallback so partial settings never hide a course.
+     */
+    private static int startForSection(int section, List<AppSettings.ClassTime> classTimes) {
+        AppSettings.ClassTime slot = slotForSection(classTimes, section);
+        if (slot != null) return slot.startMinute;
+        if (section >= 1 && section <= DEFAULT_START_TIMES.length) {
+            return DEFAULT_START_TIMES[section - 1];
+        }
         return 8 * 60 + (section - 1) * 50;
     }
 
-    private static int endForSection(int section, String adapter) {
-        if (ImportAdapter.NEU.equals(adapter) && section >= 1 && section <= NEU_END_TIMES.length) {
-            return NEU_END_TIMES[section - 1];
+    private static int endForSection(int section, List<AppSettings.ClassTime> classTimes) {
+        AppSettings.ClassTime slot = slotForSection(classTimes, section);
+        if (slot != null) return slot.endMinute;
+        return startForSection(section, classTimes) + 45;
+    }
+
+    /**
+     * Looks up a period in the user's 作息 by its declared period number, falling back to list
+     * position. A hand-edited table may skip or renumber periods, so matching on {@code period}
+     * first keeps "第 6 节" pointing at the slot the user labelled 6.
+     */
+    private static AppSettings.ClassTime slotForSection(List<AppSettings.ClassTime> classTimes, int section) {
+        if (classTimes == null || classTimes.isEmpty() || section < 1) return null;
+        for (AppSettings.ClassTime slot : classTimes) {
+            if (slot != null && slot.period == section
+                    && slot.endMinute > slot.startMinute) {
+                return slot;
+            }
         }
-        return startForSection(section, adapter) + 45;
+        if (section <= classTimes.size()) {
+            AppSettings.ClassTime slot = classTimes.get(section - 1);
+            if (slot != null && slot.endMinute > slot.startMinute) return slot;
+        }
+        return null;
     }
 
     private static void mergeCourse(Map<String, Course> merged, Course course) {
@@ -277,9 +433,24 @@ public final class ImportParser {
                 + course.dayOfWeek + '\u0000' + course.startMinute + '\u0000' + course.endMinute;
         Course existing = merged.get(key);
         if (existing == null) {
+            // The same timetable is frequently exposed twice: once through the vendor's runtime
+            // activity model and once through the visible DOM. Those representations may differ
+            // only by optional metadata, for example "工学馆204" versus
+            // "工学馆204(学校本部)". Treating location as an exact key leaves two overlapping
+            // cards in the database, so also look for a semantically equivalent session.
+            for (Course candidate : merged.values()) {
+                if (sameLogicalSession(candidate, course)) {
+                    existing = candidate;
+                    break;
+                }
+            }
+        }
+        if (existing == null) {
             merged.put(key, course);
             return;
         }
+        existing.teacher = richerMetadata(existing.teacher, course.teacher, false);
+        existing.location = richerMetadata(existing.location, course.location, true);
         long existingMask = existing.weekMask != 0L ? existing.weekMask
                 : rangeMask(existing.startWeek, existing.endWeek, existing.parity);
         long incomingMask = course.weekMask != 0L ? course.weekMask
@@ -288,6 +459,45 @@ public final class ImportParser {
         existing.startWeek = firstWeek(existing.weekMask);
         existing.endWeek = lastWeek(existing.weekMask);
         existing.parity = 0;
+    }
+
+    private static boolean sameLogicalSession(Course first, Course second) {
+        return first.name.equalsIgnoreCase(second.name)
+                && first.dayOfWeek == second.dayOfWeek
+                // WakeUp identifies timetable placement with startNode/step. Clock minutes are
+                // alarm metadata and may differ between a vendor model and rendered page even
+                // though both describe the same period grid slot.
+                && first.startNode == second.startNode
+                && first.step == second.step
+                && compatibleMetadata(first.teacher, second.teacher, false)
+                && compatibleMetadata(first.location, second.location, true);
+    }
+
+    private static boolean compatibleMetadata(String first, String second, boolean location) {
+        String left = metadataKey(first, location);
+        String right = metadataKey(second, location);
+        return left.isEmpty() || right.isEmpty() || left.equals(right);
+    }
+
+    private static String richerMetadata(String current, String incoming, boolean location) {
+        String left = normalize(current == null ? "" : current);
+        String right = normalize(incoming == null ? "" : incoming);
+        if (left.isEmpty()) return right;
+        if (right.isEmpty()) return left;
+        if (!metadataKey(left, location).equals(metadataKey(right, location))) return left;
+        return right.length() > left.length() ? right : left;
+    }
+
+    private static String metadataKey(String value, boolean location) {
+        String compact = normalize(value == null ? "" : value)
+                .replaceAll("\\s+", "")
+                .toLowerCase(Locale.ROOT);
+        if (!location || compact.isEmpty()) return compact;
+        // Campus qualifiers describe the same room and vary between the runtime model and DOM.
+        // Only strip a bracketed trailing qualifier, never a real building/room component.
+        String withoutCampus = compact.replaceFirst(
+                "[（(\\[【](?:学校本部|[^()（）\\[\\]【】]{1,20}校区)[）)\\]】]$", "");
+        return withoutCampus.isEmpty() ? compact : withoutCampus;
     }
 
     private static long rangeMask(int first, int last, int parity) {
@@ -332,8 +542,10 @@ public final class ImportParser {
                 String candidate = part.trim();
                 if (candidate.length() < 2 || candidate.length() > 5) continue;
                 // Skip room/building tokens and non-teacher roles.
-                if (candidate.matches(".*(馆|楼|室|房|区|中心|校区)$")) continue;
-                if (candidate.matches("^(实验辅导?老师|辅导教师|助教|监考老师|教师|老师)$")) continue;
+                if (candidate.matches(".*(馆|楼|室|房|区|中心|校区|操场|球场|机房)$")) continue;
+                if (candidate.matches("^(实验辅导?老师|辅导教师|助教|监考老师|教师|老师|实验员|带教|外聘|待定|未安排)$")) continue;
+                // Week/parity and workload fragments that survive into a parenthesis group.
+                if (candidate.matches("^(单周|双周|全周|连上|待安排|不排课)$")) continue;
                 if (!candidate.matches("[\\u4e00-\\u9fa5]{2,5}")) continue;
                 names.add(candidate);
             }
@@ -347,17 +559,31 @@ public final class ImportParser {
      */
     private static String extractRoom(String text) {
         // Building + room number, e.g. 工学馆307, A303, 第一教学楼216, 3号教学楼201, 科技楼B105.
+        // A separator or wing may sit between building and number: 综合楼-234, 教学楼 A305,
+        // 信息楼#201, 综合楼B区201.
         Matcher matcher = Pattern.compile(
-                "([\\u4e00-\\u9fa5A-Za-z0-9]{1,10}?(?:馆|楼|室|房|中心|教室|机房|操场|球场)[A-Za-z]?\\d{1,4})")
+                "([\\u4e00-\\u9fa5A-Za-z0-9]{1,10}?(?:馆|楼|室|房|中心|教室|机房|操场|球场)"
+                        + "[-—#\\s]?[A-Za-z]?[-—#区]?\\d{1,4})")
                 .matcher(text);
-        if (matcher.find()) return matcher.group(1);
+        if (matcher.find()) return tidyRoom(matcher.group(1));
         // Standalone place ending in a place word without a number, e.g. 乒乓球室, 体育馆, 实验中心.
         matcher = Pattern.compile("([\\u4e00-\\u9fa5]{2,10}(?:室|馆|中心|操场|球场|机房))").matcher(text);
-        if (matcher.find()) return matcher.group(1);
-        // Bare building+number without a place word, e.g. after a comma: ",A303)" or ",信息楼201".
-        matcher = Pattern.compile("[,，]\\s*([A-Za-z\\u4e00-\\u9fa5]{1,8}\\d{2,4})\\s*[\\)）]?").matcher(text);
-        if (matcher.find()) return matcher.group(1);
+        if (matcher.find()) return tidyRoom(matcher.group(1));
+        // A bare room code with no place word, delimited by a comma or wrapped in parentheses:
+        // ",A303)", ",信息楼201", "(4#201)", "(A-303)". The code must start with a letter/汉字 or
+        // use a "#" wing separator, otherwise a week range like "(1-16)" would look like a room.
+        String code = "(?:[A-Za-z\\u4e00-\\u9fa5][A-Za-z0-9\\u4e00-\\u9fa5]{0,7}[-—#区]?\\d{2,4}"
+                + "|\\d{1,3}#\\d{2,4})";
+        matcher = Pattern.compile("[,，]\\s*(" + code + ")\\s*[\\)）]?").matcher(text);
+        if (matcher.find()) return tidyRoom(matcher.group(1));
+        matcher = Pattern.compile("[\\(（]\\s*(" + code + ")\\s*[\\)）]").matcher(text);
+        if (matcher.find()) return tidyRoom(matcher.group(1));
         return "";
+    }
+
+    /** Collapses the separators a room token may carry, so "综合楼 - 234" becomes "综合楼-234". */
+    private static String tidyRoom(String value) {
+        return value == null ? "" : value.replaceAll("\\s+", "").trim();
     }
 
     private static String cleanupName(String value) {
@@ -385,9 +611,10 @@ public final class ImportParser {
                 || value.matches("^\\d{1,2}[:：]\\d{2}.*");
     }
 
-    private static boolean isNoise(String value) {
+    private static boolean isNoise(String value, boolean nameWasExplicit) {
         String compact = value.replaceAll("\\s", "");
         if (compact.isEmpty() || compact.equals("课表") || compact.equals("课程表")) return true;
+        if (compact.matches(".*(?:学年|学期).*(?:的)?课表$")) return true;
         if (compact.equals("上午") || compact.equals("下午") || compact.equals("晚上")) return true;
         if (compact.matches("^(星期|周)[一二三四五六日]$")) return true;
         // Summary/notes/metadata keywords
@@ -404,8 +631,22 @@ public final class ImportParser {
         // Empty/placeholder values
         if (compact.equals("无") || compact.equals("暂无")) return true;
         if (compact.matches("^[—\\-\\.。,，、]+$")) return true;
-        // Very short text without course-related keywords (likely just names/labels)
+        // Very short text without course-related keywords is usually a teacher name or a stray
+        // label. Plenty of real courses are this short though (体育, 线性代数, 高等代数), so only
+        // apply the guard to names we had to guess out of cell text, and let well-known short
+        // subjects through either way.
+        if (nameWasExplicit || isCommonShortSubject(compact)) return false;
         if (compact.length() <= 4 && !compact.matches(".*[课程学实验设计理论基础导论概论原理技术方法].*")) return true;
         return false;
+    }
+
+    /**
+     * Short course names that turn up across schools and would otherwise be mistaken for a teacher
+     * name by the length guard in {@link #isNoise}.
+     */
+    private static boolean isCommonShortSubject(String compact) {
+        return compact.matches(".*(体育|代数|几何|英语|日语|俄语|法语|德语|语文|数学|物理|化学|生物"
+                + "|政治|历史|地理|音乐|美术|军训|概率|统计|会计|法学|哲学|写作|阅读|听力|口语"
+                + "|素描|色彩|声乐|钢琴|舞蹈|游泳|篮球|足球|排球|网球|羽毛球|乒乓球|武术|健美操).*");
     }
 }

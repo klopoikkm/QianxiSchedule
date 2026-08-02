@@ -4,11 +4,10 @@ public final class ImportScript {
     private ImportScript() {}
 
     public static String forAdapter(String adapterId) {
-        // NEUQ/NEU fetch the timetable directly through the EAMS/JWAPP API, so they work even when
-        // the portal page itself fails to render (e.g. jQuery missing → bare skeleton). Only the
-        // generic adapter depends on the visible DOM.
-        if (ImportAdapter.NEUQ_EAMS.equals(adapterId)) return NEUQ_EAMS_API;
-        if (ImportAdapter.NEU.equals(adapterId)) return NEU_API;
+        return GENERIC_PAGE;
+    }
+
+    public static String forAdapter(String adapterId, String pageUrl) {
         return GENERIC_PAGE;
     }
 
@@ -21,18 +20,56 @@ public final class ImportScript {
             const output = [];
             const seen = new Set();
             let structuredNodes = 0;
-            const docs = [document];
-            for (const frame of document.querySelectorAll('iframe')) {
-              try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (_) {}
+            let runtimeActivities = 0;
+            let visualCandidates = 0;
+            let visualDays = 0;
+            let visualSections = 0;
+            let visualNodes = 0;
+            let recordRows = 0;
+            let missingWeekCandidates = 0;
+            let selectedSource = 'page-dom';
+            let domPassSkipped = 0;
+            let qiangzhiFallback = 0;
+            let structuredCandidates = 0;
+            let vueRoots = 0;
+            const docs = [];
+            const seenDocs = new Set();
+            const roots = [];
+            const seenRoots = new Set();
+            const seenStructured = new WeakSet();
+            function collectDocuments(doc, depth) {
+              if (!doc || depth > 4 || seenDocs.has(doc)) return;
+              seenDocs.add(doc);
+              docs.push(doc);
+              for (const frame of doc.querySelectorAll('iframe,frame')) {
+                try { collectDocuments(frame.contentDocument, depth + 1); } catch (_) {}
+              }
             }
+            function collectQueryRoots(root, depth) {
+              if (!root || depth > 6 || seenRoots.has(root) || roots.length >= 96) return;
+              seenRoots.add(root);
+              roots.push(root);
+              let nodes = [];
+              try { nodes = root.querySelectorAll ? root.querySelectorAll('*') : []; } catch (_) {}
+              for (const node of nodes) {
+                try {
+                  if (node.shadowRoot) collectQueryRoots(node.shadowRoot, depth + 1);
+                } catch (_) {}
+              }
+            }
+            collectDocuments(document, 0);
+            docs.forEach(doc => collectQueryRoots(doc, 0));
 
             function clean(value) {
               return String(value || '').replace(/\\u00a0/g, ' ').replace(/[ \\t]+/g, ' ')
                 .replace(/\\n[ \\t]+/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
             }
             function nodeText(node) {
-              return clean(node.innerText || node.textContent || node.getAttribute('title') ||
-                node.getAttribute('aria-label') || '');
+              if (node == null) return '';
+              const get = typeof node.getAttribute === 'function'
+                ? name => node.getAttribute(name) : () => '';
+              return clean(node.innerText || node.textContent || get('title') ||
+                get('aria-label') || (typeof node === 'string' ? node : ''));
             }
             function dayNumber(value) {
               const numeric = Number(value);
@@ -48,43 +85,225 @@ public final class ImportScript {
               const match = clean(value).match(/\\d{1,2}/);
               return match ? Number(match[0]) : 0;
             }
-            function addText(day, section, endSection, text, title) {
+            function attribute(node, names) {
+              if (!node || typeof node.getAttribute !== 'function') return '';
+              for (const name of names) {
+                const value = node.getAttribute(name);
+                if (value !== null && clean(value)) return clean(value);
+              }
+              return '';
+            }
+            function childText(node, selectors) {
+              if (!node || typeof node.querySelector !== 'function') return '';
+              for (const selector of selectors) {
+                const child = node.querySelector(selector);
+                const value = child ? nodeText(child) : '';
+                if (value) return value;
+              }
+              return '';
+            }
+            function labeledText(text, labels) {
+              for (const line of clean(text).split('\\n')) {
+                for (const label of labels) {
+                  const prefix = new RegExp('^\\\\s*' + label + '\\\\s*[:：]\\\\s*(.+)$', 'i');
+                  const match = line.match(prefix);
+                  if (match && clean(match[1])) return clean(match[1]);
+                }
+              }
+              return '';
+            }
+            function compactEamsWeeks(value) {
+              const match = clean(value).match(/[（(]\\s*((?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?)(?:\\s*[,，、]\\s*(?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?))*)\\s*([单双])?\\s*[,，]/);
+              if (!match) return '';
+              return clean(match[1]) + '周' + (match[2] ? '(' + match[2] + ')' : '');
+            }
+            function courseFields(node, text) {
+              const lines = clean(text).split('\\n').map(clean).filter(Boolean);
+              const weekLine = lines.findIndex(line =>
+                /\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?.*周/.test(line));
+              let name = attribute(node, ['data-course-name', 'data-kcmc', 'data-name']) ||
+                childText(node, ['.course-name', '.kcmc', '.title', '[class*="courseName"]',
+                  '[class*="course-name"]', '[class*="kcmc"]']) ||
+                labeledText(text, ['课程名称', '课程名', '科目']);
+              let teacher = attribute(node, ['data-teacher', 'data-teacher-name', 'data-jsxm']) ||
+                childText(node, ['[title="教师"] font', '[title="老师"]', '.teacher', '.jsxm',
+                  '[class*="teacherName"]',
+                  '[class*="teacher-name"]', '[class*="jsxm"]']) ||
+                labeledText(text, ['任课教师', '授课教师', '主讲教师', '教师', '老师']);
+              let location = attribute(node, ['data-location', 'data-room', 'data-classroom', 'data-cdmc']) ||
+                childText(node, ['[title="上课地点"] font', '[title="教室"]', '.location',
+                  '.room', '.classroom', '.cdmc',
+                  '[class*="classroom"]', '[class*="location"]', '[class*="cdmc"]']) ||
+                labeledText(text, ['上课地点', '地点', '教室', '校区']);
+              let weeks = attribute(node, ['data-weeks', 'data-week', 'data-week-text', 'data-zcd']) ||
+                childText(node, ['[title="节/周"] font', '[title="周次(节次)"]', '.weeks',
+                  '.week', '.zcd', '[class*="weekText"]',
+                '[class*="week-text"]', '[class*="zcd"]']) ||
+                labeledText(text, ['上课周次', '周次', '周数']);
+              if (!weeks) weeks = compactEamsWeeks(text);
+              if (!name && lines.length && !/^(?:第?[一二三四五六七八九十\\d]+节|上午|下午|晚上|早晨)$/.test(lines[0])
+                  && !/\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?.*周/.test(lines[0])) {
+                name = lines[0];
+              }
+              if (!weeks && weekLine >= 0) {
+                const match = lines[weekLine].match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周/);
+                if (match) weeks = clean(match[0]);
+              }
+              if (!teacher && weekLine >= 0 && lines[weekLine + 1] &&
+                  /^[\\u4e00-\\u9fa5A-Za-z·,，、\\s]{2,24}$/.test(lines[weekLine + 1]) &&
+                  !/(楼|馆|教室|校区|中心|实验室|操场|场|室)/.test(lines[weekLine + 1])) {
+                teacher = lines[weekLine + 1];
+              }
+              if (!location) {
+                location = lines.find(line =>
+                  /(楼|馆|教室|校区|中心|实验室|操场|球场|机房)\\s*[-A-Za-z]?\\d*$/i.test(line) ||
+                  /^[A-Za-z]\\d{2,4}$/.test(line)) || '';
+              }
+              const weekMarker = weeks.search(/[（(]周[）)]/);
+              if (weekMarker >= 0) weeks = clean(weeks.slice(0, weekMarker));
+              const describedWeeks = weeks.match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周(?:\\s*[（(]?[单双]周?[）)]?)?/);
+              if (describedWeeks) weeks = clean(describedWeeks[0]);
+              return {name, teacher, location, weeks};
+            }
+            function addText(day, section, endSection, text, title, fields, parity) {
               day = dayNumber(day); section = sectionNumber(section);
               endSection = sectionNumber(endSection || section) || section;
               text = clean(text);
               if (!(day >= 1 && day <= 7) || !(section >= 1 && section <= 30)
                   || !text || text.length < 2 || /^(无|暂无|--|-)$/.test(text)) return;
-              // Filter out common noise patterns: UI elements, metadata, pure names
               const compact = text.replace(/\\s/g, '');
+              if (/^\\d+(?:\\.\\d+)?$/.test(compact)) return;
               if (/^(操作|编辑|删除|查看|详情|添加|修改|保存|取消|确定|提交)$/.test(compact)) return;
               if (/^(实验辅导?老师|辅导教师|助教|监考老师)/.test(compact)) return;
               if (/^(代码|编号|序号|课程号|教学班号|上课时间|上课地点)$/.test(compact)) return;
               if (/^(授课小结|教学小结|课程小结|备注|说明|注释)/.test(compact)) return;
-              // Filter single short words that are likely just names or labels
-              if (compact.length <= 4 && !/[\\d()（）]/.test(compact) &&
+              if (/^\\d{4}\\s*[-—]\\s*\\d{4}学年.*学期.*(?:的)?课表$/.test(compact)) return;
+              if (/^(时间|节次|星期|周次|上午|下午|晚上|早晨)$/.test(compact)) return;
+              fields = fields || {};
+              if (!clean(fields.name || '') && compact.length <= 4 && !/[\\d()（）]/.test(compact) &&
                   !/课|程|学|实验|设计|理论|基础|导论|概论|原理|技术|方法/.test(compact)) return;
-              const key = day + '|' + section + '|' + endSection + '|' + text;
+              let weeks = clean(fields.weeks || '');
+              if (!weeks) {
+                const weekMatch = text.match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周/);
+                if (weekMatch) weeks = clean(weekMatch[0]);
+              }
+              if (!weeks) weeks = compactEamsWeeks(text);
+              if (parity && !/[单双]/.test(weeks)) {
+                if (weeks) weeks += '(' + parity + ')';
+              }
+              if (!weeks) { missingWeekCandidates++; return; }
+              const key = day + '|' + section + '|' + endSection + '|' + text + '|' + weeks;
               if (seen.has(key)) return;
               seen.add(key);
-              output.push({ day, section, endSection: Math.max(section, endSection), text,
-                title: clean(title || '') });
+              const item = {day, section, endSection: Math.max(section, endSection), text,
+                title: clean(title || '')};
+              if (clean(fields.name || '')) item.name = clean(fields.name);
+              if (clean(fields.teacher || '')) item.teacher = clean(fields.teacher);
+              if (clean(fields.location || '')) item.location = clean(fields.location);
+              if (weeks) item.weeks = weeks;
+              if (clean(fields.startTime || '')) item.startTime = clean(fields.startTime);
+              if (clean(fields.endTime || '')) item.endTime = clean(fields.endTime);
+              output.push(item);
             }
-            function add(day, section, endSection, node) {
+            function add(day, section, endSection, node, parity) {
               const text = nodeText(node);
+              if (/\\{[^}]*第?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?周[^}]*\\}/.test(text)) {
+                addCourseBlock(day, section, endSection, node, parity);
+                return;
+              }
               addText(day, section, endSection, text,
-                node && node.getAttribute ? node.getAttribute('title') : '');
+                node && typeof node.getAttribute === 'function' ? node.getAttribute('title') : '',
+                courseFields(node, text), parity);
             }
-            function addCell(day, section, cell) {
-              const endSection = Number(section) + Math.max(1, Number(cell.rowSpan || 1)) - 1;
-              const blocks = Array.from(cell.querySelectorAll(
-                ':scope > .timetable_con, :scope > .kbcontent, :scope > .course, ' +
-                ':scope > [class*="course-item"], :scope > [class*="CourseItemInfo"]'))
+            function addCourseBlock(day, section, endSection, node, parity) {
+              const text = nodeText(node);
+              const tokens = text.split(/\\s+/).filter(Boolean);
+              const timeIndexes = [];
+              tokens.forEach((token, index) => {
+                if (/\\{[^}]*第?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?周[^}]*\\}/.test(token)) {
+                  timeIndexes.push(index);
+                }
+              });
+              if (timeIndexes.length) {
+                const property = /^(?:必修课?|选修课?|必修|选修|专基|专选|公必|公选|通识必修|通识选修|公共基础|专业基础课|专业必修|专业选修|方向)$/;
+                for (let item = 0; item < timeIndexes.length; item++) {
+                  const index = timeIndexes[item];
+                  const limit = item + 1 < timeIndexes.length ? timeIndexes[item + 1] : tokens.length;
+                  let nameIndex = index - 1;
+                  if (nameIndex >= 0 && property.test(tokens[nameIndex])) nameIndex--;
+                  const name = nameIndex >= 0 ? tokens[nameIndex] : '';
+                  const teacher = index + 1 < limit ? tokens[index + 1] : '';
+                  const location = index + 2 < limit ? tokens[index + 2] : '';
+                  const weeks = (tokens[index].match(/\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周(?:\\s*[（(]?[单双]周?[）)]?)?/) || [])[0] || '';
+                  const itemText = [name, teacher, location, weeks, tokens[index]]
+                    .filter(Boolean).join('\\n');
+                  addText(day, section, endSection, itemText, '', {
+                    name, teacher, location, weeks
+                  }, parity);
+                }
+                return;
+              }
+              const html = String(node && node.innerHTML || '');
+              const parts = html.split(/-{5,}/).filter(part =>
+                clean(String(part == null ? '' : part).replace(/<[^>]+>/g, ' ')));
+              if (parts.length <= 1) {
+                addText(day, section, endSection, text,
+                  node && typeof node.getAttribute === 'function' ? node.getAttribute('title') : '',
+                  courseFields(node, text), parity);
+                return;
+              }
+              for (const part of parts) {
+                const holder = (node.ownerDocument || document).createElement('div');
+                holder.innerHTML = String(part == null ? '' : part);
+                try { add(day, section, endSection, holder, parity); } catch (_) {}
+              }
+            }
+            function addCell(day, section, cell, parity, explicitEndSection) {
+              const endSection = Number(explicitEndSection) || Number(section) +
+                Math.max(1, Number(cell.rowSpan || 1)) - 1;
+              let blocks = Array.from(cell.querySelectorAll('.kbcontent'))
                 .filter(node => nodeText(node).length > 1);
-              if (blocks.length) blocks.forEach(node => add(day, section, endSection, node));
-              else add(day, section, endSection, cell);
+              if (!blocks.length) {
+                blocks = Array.from(cell.querySelectorAll(
+                  '.timetable_con, .course, [class*="course-item"], [class*="CourseItemInfo"]'))
+                  .filter(node => nodeText(node).length > 1);
+              }
+              if (!blocks.length) {
+                blocks = Array.from(cell.querySelectorAll('div')).filter(node =>
+                  Array.from(node.children || []).some(child =>
+                    child.classList && child.classList.contains('title')));
+              }
+              if (blocks.length) {
+                blocks.forEach(node => addCourseBlock(day, section, endSection, node, parity));
+              }
+              else add(day, section, endSection, cell, parity);
+            }
+            function chineseNumber(value) {
+              const digits = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                '六': 6, '七': 7, '八': 8, '九': 9};
+              value = clean(value);
+              if (value === '十') return 10;
+              if (value.indexOf('十') >= 0) {
+                const parts = value.split('十');
+                return (parts[0] ? digits[parts[0]] : 1) * 10 + (parts[1] ? digits[parts[1]] : 0);
+              }
+              return digits[value] || 0;
             }
             function sectionFrom(value, fallback) {
-              const match = clean(value).match(/(?:第)?(\\d{1,2})(?:\\s*[-~至—]\\s*\\d{1,2})?\\s*节/);
+              const text = clean(value);
+              let match = text.match(/(?:第)?(\\d{1,2})(?:\\s*[-~至—]\\s*\\d{1,2})?\\s*节(?!\\s*\\/\\s*周)/);
+              if (match) return Number(match[1]);
+              match = text.match(/^\\s*(\\d{1,2})\\s*[-~至—、,，]\\s*(\\d{1,2})\\s*$/);
+              if (match) return Number(match[1]);
+              match = text.match(/(?:第)?\\s*([一二三四五六七八九十]+)\\s*节/);
+              if (match) return chineseNumber(match[1]) || fallback;
+              match = text.match(/^\\s*(\\d{1,2})\\s*$/);
+              return match ? Number(match[1]) : fallback;
+            }
+            function endSectionFrom(value, fallback) {
+              const text = clean(value);
+              let match = text.match(/(?:第)?\\s*\\d{1,2}\\s*[-~至—、,，]\\s*(?:第)?\\s*(\\d{1,2})\\s*节?/);
+              if (!match) match = text.match(/^\\s*\\d{1,2}\\s*[-~至—、,，]\\s*(\\d{1,2})\\s*$/);
               return match ? Number(match[1]) : fallback;
             }
             function field(value, names) {
@@ -98,19 +317,73 @@ public final class ImportScript {
             }
             function addStructured(value) {
               if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-              const day = field(value, ['dayOfWeek', 'weekday', 'weekDay', 'day', 'xq', 'week_day']);
-              const section = field(value, ['beginSection', 'startSection', 'section', 'period', 'jc', 'startJc']);
+              const day = field(value, ['dayOfWeek', 'weekday', 'weekDay', 'day', 'xq', 'week_day',
+                'xqj', 'XQJ', 'xqmc', 'XQMC', 'skxq', 'SKXQ', 'XQ', 'weekDayCode']);
+              const section = field(value, ['beginSection', 'startSection', 'section', 'period', 'jc',
+                'startJc', 'ksjc', 'KSJC', 'djj', 'DJJ', 'jcs', 'JCS', 'startUnit', 'startTimeUnit']);
               if (!day || !section) return;
-              const name = field(value, ['courseName', 'course_name', 'name', 'courseTitle', 'title']);
-              const teacher = field(value, ['teacherName', 'teacher', 'teachers', 'instructor']);
-              const location = field(value, ['roomName', 'location', 'classroom', 'room']);
-              const weeks = field(value, ['weekDescription', 'weeks', 'weekText', 'week']);
+              const name = field(value, ['courseName', 'course_name', 'name', 'courseTitle', 'title',
+                'kcmc', 'KCMC', 'kcm', 'KCM', 'kcmcDisplay', 'KCMC_DISPLAY']);
+              let teacher = field(value, ['teacherName', 'teacher', 'teachers', 'instructor',
+                'jsmc', 'JSMC', 'jsxm', 'JSXM', 'skjs', 'SKJS', 'rkjs', 'RKJS', 'xm']);
+              const teacherSummary = field(value, ['weeksAndTeachers', 'teacherWeekText',
+                'SKJSZC', 'skjszc']);
+              if (!teacher && teacherSummary) {
+                const teacherParts = clean(teacherSummary).split('/');
+                teacher = clean(teacherParts[teacherParts.length - 1]).replace(/\\[主讲\\]/g, '');
+              }
+              let location = field(value, ['roomName', 'location', 'classroom', 'room',
+                'jasmc', 'JASMC', 'cdmc', 'CDMC', 'jxcdmc', 'JXCDMC', 'skdd', 'SKDD']);
+              let weeks = field(value, ['weekDescription', 'weeks', 'weekText', 'week',
+                'zcmc', 'ZCMC', 'skzc', 'SKZC', 'zcd', 'ZCD']);
+              const firstWeek = Number(field(value,
+                ['startWeek', 'beginWeek', 'qszc', 'QSZC']));
+              const lastWeek = Number(field(value,
+                ['endWeek', 'finishWeek', 'jszc', 'JSZC']));
+              if (!weeks && firstWeek > 0) {
+                weeks = firstWeek + (lastWeek >= firstWeek ? '-' + lastWeek : '') + '周';
+              }
+              const startTime = field(value, ['beginTime', 'startTime', 'kssj', 'KSSJ']);
+              const endTime = field(value, ['endTime', 'finishTime', 'jssj', 'JSSJ']);
+              let endSection = field(value, ['endSection', 'finishSection', 'endJc', 'endPeriod',
+                'jsjc', 'JSJC', 'mjj', 'MJJ', 'endUnit', 'endTimeUnit']);
+              if (!endSection) {
+                const sectionRange = clean(section).match(/\\d{1,2}\\s*[-~至—]\\s*(\\d{1,2})/);
+                if (sectionRange) endSection = sectionRange[1];
+              }
+              const titleDetails = field(value, ['titleDetail', 'scheduleDetails',
+                'courseDetails', 'SKXQXQ']);
+              let detailed = false;
+              if (Array.isArray(titleDetails)) {
+                const candidates = titleDetails.length > 1 ? titleDetails.slice(1) : titleDetails;
+                for (const rawDetail of candidates) {
+                  const detail = clean(rawDetail);
+                  const match = detail.match(
+                    /^([0-9\\s,，、\\-~至—()（）单双周]+)\\s*(.*)$/);
+                  if (!match) continue;
+                  const detailWeeks = clean(match[1]) || clean(weeks);
+                  const detailLocation = clean(match[2]) || clean(location);
+                  const detailText = [name, teacher, detailLocation, detailWeeks]
+                    .filter(Boolean).join('\\n');
+                  addText(day, section, endSection || section, detailText, detail, {
+                    name, teacher, location: detailLocation, weeks: detailWeeks,
+                    startTime, endTime
+                  }, '');
+                  detailed = true;
+                }
+              }
+              if (detailed) return;
               const text = [name, teacher, location, weeks].filter(Boolean).join('\\n');
-              addText(day, section, field(value, ['endSection', 'finishSection', 'endJc', 'endPeriod']) || section,
-                text || value.text || value.content || '', field(value, ['title', 'courseName']));
+              addText(day, section, endSection || section,
+                text || value.text || value.content || '', field(value, ['title', 'courseName']),
+                {name, teacher, location, weeks, startTime, endTime}, '');
             }
             function scanStructured(value, depth) {
               if (!value || depth > 6) return;
+              if (typeof value === 'object') {
+                if (seenStructured.has(value)) return;
+                seenStructured.add(value);
+              }
               if (++structuredNodes > 5000) return;
               if (Array.isArray(value)) {
                 for (const item of value) scanStructured(item, depth + 1);
@@ -119,8 +392,192 @@ public final class ImportScript {
               if (typeof value !== 'object') return;
               addStructured(value);
               for (const key of Object.keys(value)) {
-                if (key !== 'html' && key !== 'style' && key !== 'children') {
+                if (key !== 'html' && key !== 'style') {
                   scanStructured(value[key], depth + 1);
+                }
+              }
+            }
+            function scanVueRoot(root) {
+              if (!root || typeof root.querySelectorAll !== 'function') return;
+              let inspected = 0;
+              for (const node of root.querySelectorAll('*')) {
+                if (++inspected > 4000) break;
+                const instances = [];
+                try { if (node.__vue__) instances.push(node.__vue__); } catch (_) {}
+                try { if (node.__vueParentComponent) instances.push(node.__vueParentComponent); } catch (_) {}
+                try { if (node.__vue_app__) instances.push(node.__vue_app__); } catch (_) {}
+                for (const instance of instances) {
+                  vueRoots++;
+                  for (const value of [instance.$data, instance._data, instance.$props,
+                      instance.props, instance.data, instance.setupState,
+                      instance.ctx, instance.proxy && instance.proxy.$data]) {
+                    try { scanStructured(value, 0); } catch (_) {}
+                  }
+                }
+              }
+            }
+            function scanStructuredSources(root) {
+              for (const script of root.querySelectorAll(
+                  'script[type="application/json"],script[data-course-data]')) {
+                try { scanStructured(JSON.parse(script.textContent || ''), 0); } catch (_) {}
+              }
+              if (root.nodeType === 9) {
+                for (const name of ['__INITIAL_STATE__', '__INITIAL_DATA__', '__NEXT_DATA__',
+                    '__NUXT__', '__PAGE_DATA__', 'pageData', 'scheduleData', 'scheduleDatas',
+                    'currentSchedule', 'arrangedList', 'courseData', 'kbData', 'tableData',
+                    'viewModel']) {
+                  try { scanStructured(root.defaultView && root.defaultView[name], 0); } catch (_) {}
+                }
+              }
+              scanVueRoot(root);
+            }
+            function activityValue(value) {
+              if (value == null) return '';
+              if (Array.isArray(value)) {
+                return clean(value.map(item => {
+                  if (item && typeof item === 'object') {
+                    return item.name || item.teacherName || item.fullName || item.label || '';
+                  }
+                  return item;
+                }).filter(Boolean).join(','));
+              }
+              if (typeof value === 'object') {
+                return clean(value.name || value.teacherName || value.fullName ||
+                  value.label || value.text || '');
+              }
+              return clean(String(value));
+            }
+            function binaryWeeks(value) {
+              const bits = String(value == null ? '' : value).trim();
+              if (!/^[01]+$/.test(bits)) return '';
+              const weeks = [];
+              // Beangle's vaildWeeks is 1-indexed: bit 0 is a placeholder, bit n is week n.
+              for (let index = 1; index < bits.length; index++) {
+                if (bits[index] === '1') weeks.push(index);
+              }
+              if (!weeks.length) return '';
+              const ranges = [];
+              let start = weeks[0];
+              let end = start;
+              for (let index = 1; index < weeks.length; index++) {
+                if (weeks[index] === end + 1) {
+                  end = weeks[index];
+                } else {
+                  ranges.push(start === end ? String(start) : start + '-' + end);
+                  start = end = weeks[index];
+                }
+              }
+              ranges.push(start === end ? String(start) : start + '-' + end);
+              return ranges.join(',') + '周';
+            }
+            function activityEntries(slot) {
+              if (!slot) return [];
+              const entries = [];
+              const count = Math.max(0, Number(slot.count || 0));
+              for (let index = 0; index < count; index++) {
+                try { if (slot[index]) entries.push(slot[index]); } catch (_) {}
+              }
+              if (!entries.length && Array.isArray(slot)) {
+                for (const item of slot) if (item) entries.push(item);
+              }
+              if (!entries.length && typeof slot === 'object' &&
+                  (slot.courseName || slot.course || slot.__qx)) {
+                entries.push(slot);
+              }
+              return entries;
+            }
+            function scanBeangleRuntime(win) {
+              if (!win) return;
+              const tables = [];
+              const tableSet = new Set();
+              function keepTable(table) {
+                if (!table || !table.activities || tableSet.has(table)) return;
+                tableSet.add(table);
+                tables.push(table);
+              }
+              try { keepTable(win.table0); } catch (_) {}
+              try {
+                let checked = 0;
+                for (const name in win) {
+                  if (++checked > 5000) break;
+                  if (/^table\\d+$/.test(name)) {
+                    try { keepTable(win[name]); } catch (_) {}
+                  }
+                }
+              } catch (_) {}
+              for (const table of tables) {
+                const activities = table.activities;
+                let unitCount = 0;
+                try { unitCount = Number(win.unitCount || table.unitCount || 0); } catch (_) {}
+                let length = Number(activities && activities.length || 0);
+                if (!length && activities && typeof activities === 'object') {
+                  try {
+                    const numericKeys = Object.keys(activities)
+                      .filter(key => /^\\d+$/.test(key)).map(Number);
+                    if (numericKeys.length) length = Math.max(...numericKeys) + 1;
+                  } catch (_) {}
+                }
+                if (!unitCount && length >= 7 && length % 7 === 0) unitCount = length / 7;
+                if (!(unitCount >= 1 && unitCount <= 30) || !length) continue;
+                const found = [];
+                for (let slotIndex = 0; slotIndex < length; slotIndex++) {
+                  let slot = null;
+                  try { slot = activities[slotIndex]; } catch (_) {}
+                  for (const activity of activityEntries(slot)) {
+                    let name = activityValue(activity.courseName || activity.course);
+                    let teacher = activityValue(activity.teachers || activity.teacherName ||
+                      activity.teacher);
+                    let location = activityValue(activity.room || activity.roomName);
+                    let weekBits = String(activity.vaildWeeks || activity.validWeeks ||
+                      activity.weeks || '');
+                    if ((!name || !weekBits) && activity.__qx) {
+                      const args = activity.__qx;
+                      if (!name) name = activityValue(args[3] != null ? args[3] : args[2]);
+                      if (!teacher) teacher = activityValue(args[1]);
+                      if (!location) location = activityValue(args[5]);
+                      if (!weekBits) weekBits = String(args[6] == null ? '' : args[6]);
+                    }
+                    const weeks = binaryWeeks(weekBits);
+                    const day = Math.floor(slotIndex / unitCount) + 1;
+                    const section = slotIndex % unitCount + 1;
+                    if (!name || !weeks || day < 1 || day > 7) continue;
+                    found.push({name, teacher, location, weeks, day, section});
+                  }
+                }
+                const grouped = new Map();
+                for (const item of found) {
+                  const key = [item.name, item.teacher, item.location, item.weeks, item.day]
+                    .join('\\u0000');
+                  if (!grouped.has(key)) grouped.set(key, []);
+                  grouped.get(key).push(item);
+                }
+                for (const group of grouped.values()) {
+                  group.sort((left, right) => left.section - right.section);
+                  const unique = group.filter((item, index) =>
+                    index === 0 || item.section !== group[index - 1].section);
+                  let run = [unique[0]];
+                  function emitRun() {
+                    if (!run[0]) return;
+                    const first = run[0];
+                    const last = run[run.length - 1];
+                    const text = [first.name, first.teacher, first.location, first.weeks]
+                      .filter(Boolean).join('\\n');
+                    const before = output.length;
+                    addText(first.day, first.section, last.section, text, first.name, {
+                      name: first.name, teacher: first.teacher,
+                      location: first.location, weeks: first.weeks
+                    }, '');
+                    if (output.length > before) runtimeActivities++;
+                  }
+                  for (let index = 1; index < unique.length; index++) {
+                    if (unique[index].section === run[run.length - 1].section + 1) {
+                      run.push(unique[index]);
+                    } else {
+                      emitRun();
+                      run = [unique[index]];
+                    }
+                  }
+                  emitRun();
                 }
               }
             }
@@ -130,7 +587,7 @@ public final class ImportScript {
               if (!match) match = compact.match(/^([一二三四五六日天])$/);
               return match ? dayNumber(match[1]) : 0;
             }
-            function scanTable(table) {
+            function scanTable(table, mode) {
               const rows = Array.from(table.rows || []);
               const grid = [];
               rows.forEach((row, rowIndex) => {
@@ -144,7 +601,9 @@ public final class ImportScript {
                     const targetRow = rowIndex + rowOffset;
                     if (!grid[targetRow]) grid[targetRow] = [];
                     for (let colOffset = 0; colOffset < colSpan; colOffset++) {
-                      grid[targetRow][column + colOffset] = {cell, originRow: rowIndex};
+                      grid[targetRow][column + colOffset] = {
+                        cell, originRow: rowIndex, originColumn: column
+                      };
                     }
                   }
                   column += colSpan;
@@ -152,30 +611,290 @@ public final class ImportScript {
               });
               const maxColumns = grid.reduce((max, row) => Math.max(max, row.length), 0);
               if (maxColumns < 7) return;
-              const dayColumns = {};
-              for (let row = 0; row < Math.min(4, grid.length); row++) {
+              const columnDays = {};
+              const columnParity = {};
+              for (let row = 0; row < Math.min(6, grid.length); row++) {
                 for (let column = 0; column < grid[row].length; column++) {
                   const entry = grid[row][column];
                   const day = entry ? headerDay(nodeText(entry.cell)) : 0;
-                  if (day && dayColumns[day] === undefined) dayColumns[day] = column;
+                  if (day) columnDays[column] = day;
+                  const header = entry ? nodeText(entry.cell).replace(/\\s+/g, '') : '';
+                  if (/^(单|双)(周)?$/.test(header)) columnParity[column] = header.charAt(0);
                 }
               }
-              if (Object.keys(dayColumns).length !== 7) {
+              if (new Set(Object.values(columnDays)).size < 5) {
                 const startColumn = Math.max(0, maxColumns - 7);
-                for (let day = 1; day <= 7; day++) dayColumns[day] = startColumn + day - 1;
+                for (let day = 1; day <= 7; day++) columnDays[startColumn + day - 1] = day;
               }
+              const mappedColumns = Object.keys(columnDays).map(Number).sort((a, b) => a - b);
+              if (!mappedColumns.length) return;
+              const firstDayColumn = mappedColumns[0];
+              let nextSection = 1;
+              let groupedRow = 0;
               grid.forEach((logicalRow, rowIndex) => {
-                const labels = logicalRow.slice(0, Math.min(4, logicalRow.length))
-                  .filter(Boolean).map(entry => nodeText(entry.cell)).join(' ');
-                const section = sectionFrom(labels, Math.max(1, rowIndex));
-                for (let day = 1; day <= 7; day++) {
-                  const entry = logicalRow[dayColumns[day]];
-                  if (entry && entry.originRow === rowIndex) addCell(day, section, entry.cell);
+                const originalEntries = logicalRow.filter((entry, column) => entry &&
+                  entry.originRow === rowIndex && entry.originColumn === column);
+                const isHeaderRow = originalEntries.some(entry => {
+                  const value = nodeText(entry.cell).replace(/\\s+/g, '');
+                  return headerDay(value) || /^(单|双)(周)?$/.test(value);
+                }) || (originalEntries.length === 1 &&
+                  Number(originalEntries[0].cell.colSpan || 1) >= 5 &&
+                  /(?:学年|学期|课表)/.test(nodeText(originalEntries[0].cell)));
+                if (isHeaderRow) return;
+                groupedRow++;
+                const labelEntries = logicalRow.slice(0, firstDayColumn)
+                  .filter((entry, column) => entry && entry.originColumn === column);
+                let section = 0;
+                let labeledEndSection = 0;
+                for (const entry of labelEntries) {
+                  const label = nodeText(entry.cell);
+                  section = sectionFrom(label, section);
+                  labeledEndSection = endSectionFrom(label, labeledEndSection);
+                  if (section) break;
                 }
+                let explicitEndSection = labeledEndSection;
+                if (!section && mode === 'qiangzhi') {
+                  section = groupedRow <= 3 ? groupedRow * 2 - 1 : groupedRow * 2 - 2;
+                  explicitEndSection = section + ((section === 5 || section === 12) ? 0 : 1);
+                }
+                if (!section) section = nextSection;
+                const before = output.length;
+                for (const column of mappedColumns) {
+                  const entry = logicalRow[column];
+                  if (!entry || entry.originRow !== rowIndex || entry.originColumn !== column) continue;
+                  const parity = Number(entry.cell.colSpan || 1) === 1
+                    ? columnParity[column] || '' : '';
+                  addCell(columnDays[column], section, entry.cell, parity, explicitEndSection);
+                }
+                if (output.length > before) nextSection = Math.max(nextSection, section + 1);
               });
             }
-            function scan(doc) {
-              for (const cell of doc.querySelectorAll('td[id],div[id]')) {
+            // WakeUp's strong智 parser walks the vendor's actual #kbtable instead of relying on
+            // generic header detection. Keep this as a fallback for deployments whose table has
+            // no recognizable day headers but still exposes the standard kbcontent metadata.
+            function scanQiangzhiWakeup(table) {
+              if (!table) return;
+              const rows = Array.from(table.querySelectorAll('tr'));
+              let nodeCount = 0;
+              for (const row of rows) {
+                const cells = Array.from(row.cells || []);
+                if (!cells.length) continue;
+                nodeCount++;
+                const firstLooksLikeLabel = cells.length >= 8;
+                const first = firstLooksLikeLabel ? 1 : 0;
+                for (let index = first; index < cells.length && index < first + 7; index++) {
+                  const day = index - first + 1;
+                  const cell = cells[index];
+                  let blocks = Array.from(cell.querySelectorAll('.kbcontent'))
+                    .filter(node => nodeText(node).length > 1);
+                  if (!blocks.length) blocks = [cell];
+                  for (const block of blocks) {
+                    const html = String(block.innerHTML || '');
+                    const parts = html.split(/-{5,}/).filter(part =>
+                      clean(String(part).replace(/<[^>]+>/g, ' ')));
+                    const pieces = parts.length ? parts : [html || nodeText(block)];
+                    for (const part of pieces) {
+                      const holder = (block.ownerDocument || document).createElement('div');
+                      holder.innerHTML = String(part || '');
+                      const text = nodeText(holder);
+                      if (!text) continue;
+                      const fields = courseFields(holder, text);
+                      addText(day, nodeCount <= 3 ? nodeCount * 2 - 1 : nodeCount * 2 - 2,
+                        nodeCount <= 3 ? nodeCount * 2 - 2 : nodeCount * 2 - 1,
+                        text, '', fields, '');
+                    }
+                  }
+                }
+              }
+            }
+            function recordRole(value) {
+              const text = clean(value).replace(/[：:]/g, '').replace(/\\s+/g, '');
+              if (/^(?:课程名称|课程名|科目名称|科目|课程)$/.test(text)) return 'name';
+              if (/^(?:星期|上课星期|周几|星期几)$/.test(text)) return 'day';
+              if (/^(?:节次|上课节次|课节|上课节数)$/.test(text)) return 'section';
+              if (/^(?:上课时间|授课时间|时间)$/.test(text)) return 'time';
+              if (/^(?:周次|上课周次|授课周次|周数)$/.test(text)) return 'weeks';
+              if (/^(?:教师|任课教师|授课教师|主讲教师|老师)$/.test(text)) return 'teacher';
+              if (/^(?:上课地点|授课地点|教室|场地|地点)$/.test(text)) return 'location';
+              return '';
+            }
+            function scanRecordTable(table) {
+              const rows = Array.from(table.rows || []);
+              let headerIndex = -1;
+              let roles = {};
+              for (let rowIndex = 0; rowIndex < Math.min(rows.length, 8); rowIndex++) {
+                const candidate = {};
+                Array.from(rows[rowIndex].cells || []).forEach((cell, column) => {
+                  const role = recordRole(nodeText(cell));
+                  if (role && candidate[role] === undefined) candidate[role] = column;
+                });
+                const hasPosition = candidate.time !== undefined ||
+                  (candidate.day !== undefined && candidate.section !== undefined);
+                if (candidate.name !== undefined && hasPosition && Object.keys(candidate).length >= 3) {
+                  headerIndex = rowIndex;
+                  roles = candidate;
+                  break;
+                }
+              }
+              if (headerIndex < 0) return;
+              for (let rowIndex = headerIndex + 1; rowIndex < rows.length; rowIndex++) {
+                const cells = Array.from(rows[rowIndex].cells || []);
+                const value = role => roles[role] === undefined || !cells[roles[role]]
+                  ? '' : nodeText(cells[roles[role]]);
+                const name = value('name');
+                const time = value('time');
+                const dayText = value('day') || time;
+                const sectionText = value('section') || time;
+                const day = dayNumber(dayText);
+                const section = sectionFrom(sectionText, 0);
+                const endSection = endSectionFrom(sectionText, section);
+                if (!name || !day || !section) continue;
+                const teacher = value('teacher');
+                const location = value('location');
+                const weeks = value('weeks');
+                const before = output.length;
+                addText(day, section, endSection, [name, teacher, location, weeks]
+                  .filter(Boolean).join('\\n'), '', {name, teacher, location, weeks}, '');
+                if (output.length > before) recordRows++;
+              }
+            }
+            function visibleRect(node) {
+              try {
+                const rect = node.getBoundingClientRect();
+                const view = node.ownerDocument && node.ownerDocument.defaultView;
+                const style = view && view.getComputedStyle ? view.getComputedStyle(node) : null;
+                if (!rect || rect.width < 8 || rect.height < 8 || !style ||
+                    style.display === 'none' || style.visibility === 'hidden' ||
+                    Number(style.opacity || 1) === 0) return null;
+                return rect;
+              } catch (_) {
+                return null;
+              }
+            }
+            function scanVisualTimetable(doc) {
+              // Layout capability is the gate: school domains only select known system/time
+              // profiles and never decide whether a timetable can be parsed.
+              const elements = Array.from(doc.querySelectorAll('th,td,div,span,li'));
+              const dayAnchors = {};
+              for (const node of elements) {
+                const value = nodeText(node).replace(/\\s+/g, '');
+                if (!/^(?:星期|周)[一二三四五六日天]$/.test(value)) continue;
+                const day = headerDay(value);
+                const rect = visibleRect(node);
+                if (!day || !rect) continue;
+                const area = rect.width * rect.height;
+                if (!dayAnchors[day] || area < dayAnchors[day].area) {
+                  dayAnchors[day] = {day, rect, area};
+                }
+              }
+              const days = Object.values(dayAnchors).sort((a, b) =>
+                (a.rect.left + a.rect.width / 2) - (b.rect.left + b.rect.width / 2));
+              visualDays = Math.max(visualDays, days.length);
+              if (days.length < 5) return;
+              const firstDayCenter = days[0].rect.left + days[0].rect.width / 2;
+              const sectionAnchors = {};
+              function keepSection(node, explicit) {
+                const value = nodeText(node).replace(/\\s+/g, '');
+                if (explicit && !/^(?:第)?(?:\\d{1,2}|[一二三四五六七八九十]+)节$/.test(value)) return;
+                if (!explicit && !/^\\d{1,2}$/.test(value)) return;
+                const section = sectionFrom(value, 0);
+                const rect = visibleRect(node);
+                if (!section || section > 30 || !rect) return;
+                if (!explicit && rect.right >= firstDayCenter) return;
+                const area = rect.width * rect.height;
+                if (!sectionAnchors[section] || area < sectionAnchors[section].area) {
+                  sectionAnchors[section] = {section, rect, area};
+                }
+              }
+              elements.forEach(node => keepSection(node, true));
+              if (Object.keys(sectionAnchors).length < 2) {
+                elements.forEach(node => keepSection(node, false));
+              }
+              const sections = Object.values(sectionAnchors).sort((a, b) =>
+                (a.rect.top + a.rect.height / 2) - (b.rect.top + b.rect.height / 2));
+              visualSections = Math.max(visualSections, sections.length);
+              if (sections.length < 2) return;
+
+              const dayCenters = days.map(anchor =>
+                anchor.rect.left + anchor.rect.width / 2);
+              const dayGaps = dayCenters.slice(1).map((value, index) => value - dayCenters[index])
+                .filter(value => value > 4);
+              const columnWidth = dayGaps.length
+                ? dayGaps.sort((a, b) => a - b)[Math.floor(dayGaps.length / 2)]
+                : days[0].rect.width;
+              const sectionTops = sections.map(anchor => anchor.rect.top);
+              const sectionGaps = sectionTops.slice(1)
+                .map((value, index) => value - sectionTops[index]).filter(value => value > 4);
+              const rowHeight = sectionGaps.length
+                ? sectionGaps.sort((a, b) => a - b)[Math.floor(sectionGaps.length / 2)]
+                : sections[0].rect.height;
+              const left = dayCenters[0] - columnWidth * 0.6;
+              const right = dayCenters[dayCenters.length - 1] + columnWidth * 0.6;
+              const top = sectionTops[0] - rowHeight * 0.25;
+              const bottom = sectionTops[sectionTops.length - 1] + rowHeight * 1.25;
+              const candidates = [];
+              for (const node of doc.querySelectorAll('td,div,li')) {
+                const text = nodeText(node);
+                const compact = text.replace(/\\s/g, '');
+                if (compact.length < 5 || compact.length > 600 ||
+                    !/[\\u4e00-\\u9fa5A-Za-z]/.test(compact)) continue;
+                if (/^\\d{4}[-—]\\d{4}学年.*课表$/.test(compact) ||
+                    /(?:版权所有|Copyright|本科教务管理系统|我的课表)$/.test(compact)) continue;
+                const rect = visibleRect(node);
+                if (!rect || rect.width > columnWidth * 1.8 || rect.height > rowHeight * 8) continue;
+                const centerX = rect.left + rect.width / 2;
+                const centerY = rect.top + rect.height / 2;
+                if (centerX < left || centerX > right || centerY < top || centerY > bottom) continue;
+                const className = String(node.className || '');
+                const hasWeek = /\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?.*周/.test(text);
+                const multiLine = text.split('\\n').filter(line => clean(line)).length >= 2;
+                const courseClass = /course|lesson|schedule|timetable|kb|activity|task|card/i
+                  .test(className);
+                if (!hasWeek && !multiLine && !courseClass) continue;
+                const score = (hasWeek ? 8 : 0) + (multiLine ? 4 : 0) +
+                  (courseClass ? 3 : 0);
+                candidates.push({node, text, rect, score,
+                  area: rect.width * rect.height});
+              }
+              visualNodes = Math.max(visualNodes, candidates.length);
+              candidates.sort((a, b) => b.score - a.score || a.area - b.area);
+              const accepted = [];
+              for (const candidate of candidates) {
+                const centerX = candidate.rect.left + candidate.rect.width / 2;
+                let dayAnchor = days[0];
+                for (const anchor of days) {
+                  const anchorX = anchor.rect.left + anchor.rect.width / 2;
+                  const bestX = dayAnchor.rect.left + dayAnchor.rect.width / 2;
+                  if (Math.abs(anchorX - centerX) < Math.abs(bestX - centerX)) dayAnchor = anchor;
+                }
+                let startAnchor = sections[0];
+                for (const anchor of sections) {
+                  if (Math.abs(anchor.rect.top - candidate.rect.top) <
+                      Math.abs(startAnchor.rect.top - candidate.rect.top)) startAnchor = anchor;
+                }
+                let endSection = startAnchor.section;
+                for (const anchor of sections) {
+                  if (anchor.rect.top >= startAnchor.rect.top - 2 &&
+                      anchor.rect.top < candidate.rect.bottom - rowHeight * 0.2) {
+                    endSection = Math.max(endSection, anchor.section);
+                  }
+                }
+                const duplicate = accepted.some(item =>
+                  item.day === dayAnchor.day && item.section === startAnchor.section &&
+                  (item.text === candidate.text || item.text.includes(candidate.text) ||
+                    candidate.text.includes(item.text)));
+                if (duplicate) continue;
+                const before = output.length;
+                add(dayAnchor.day, startAnchor.section, endSection, candidate.node, '');
+                if (output.length > before) {
+                  accepted.push({day: dayAnchor.day, section: startAnchor.section,
+                    text: candidate.text});
+                  visualCandidates++;
+                }
+              }
+            }
+            function scan(root) {
+              for (const cell of root.querySelectorAll('td[id],div[id]')) {
                 const id = cell.id || '';
                 let match = id.match(/^(\\d)[-_](\\d{1,2})$/);
                 if (match) addCell(Number(match[1]), Number(match[2]), cell);
@@ -184,7 +903,7 @@ public final class ImportScript {
                 match = id.match(/(?:day|d|xq)[-_]?([1-7])[^0-9]+(?:section|s|jc)?[_-]?(\\d{1,2})/i);
                 if (match) addCell(Number(match[1]), Number(match[2]), cell);
               }
-              for (const cell of doc.querySelectorAll(
+              for (const cell of root.querySelectorAll(
                   '[data-day],[data-weekday],[data-xq],[data-day-of-week],[data-course-day]')) {
                 const day = cell.dataset.day || cell.dataset.weekday || cell.dataset.xq ||
                   cell.dataset.dayOfWeek || cell.dataset.courseDay;
@@ -193,27 +912,140 @@ public final class ImportScript {
                   sectionFrom(nodeText(cell), 1);
                 addCell(day, section, cell);
               }
-              for (const script of doc.querySelectorAll('script[type="application/json"],script[data-course-data]')) {
-                try { scanStructured(JSON.parse(script.textContent || ''), 0); } catch (_) {}
+              const zhengfang = root.querySelector('#kbgrid_table_0,#table1,#Table1');
+              const qiangzhi = root.querySelector('#kbtable');
+              for (const table of root.querySelectorAll('table')) scanRecordTable(table);
+              if (zhengfang) scanTable(zhengfang, 'zhengfang');
+              if (qiangzhi && qiangzhi !== zhengfang) scanTable(qiangzhi, 'qiangzhi');
+              if (qiangzhi && !output.length) {
+                const before = output.length;
+                try { scanQiangzhiWakeup(qiangzhi); } catch (_) {}
+                if (output.length > before) {
+                  qiangzhiFallback++;
+                  selectedSource = 'qiangzhi-wakeup';
+                }
               }
-              for (const table of doc.querySelectorAll('table')) scanTable(table);
+              for (const table of root.querySelectorAll('table')) {
+                if (table !== zhengfang && table !== qiangzhi) scanTable(table, 'generic');
+              }
             }
-            docs.forEach(scan);
-            const html = document.documentElement ? document.documentElement.innerHTML : '';
+            docs.forEach(doc => {
+              try { scanBeangleRuntime(doc.defaultView); } catch (_) {}
+            });
+            // WakeUp routes one page through one vendor parser. Beangle's evaluated activity
+            // table is its authoritative model; scanning the rendered cells afterwards reads the
+            // same schedule a second time with slightly different labels and clock metadata.
+            if (runtimeActivities > 0) {
+              selectedSource = 'eams-runtime';
+              domPassSkipped = 1;
+            } else {
+              const beforeStructured = output.length;
+              roots.forEach(root => {
+                try { scanStructuredSources(root); } catch (_) {}
+              });
+              structuredCandidates = output.length - beforeStructured;
+              if (structuredCandidates > 0) {
+                selectedSource = vueRoots > 0 ? 'vue-runtime' : 'structured-data';
+                domPassSkipped = 1;
+              } else {
+                roots.forEach(scan);
+              }
+            }
+            if (!output.length) {
+              roots.forEach(scanVisualTimetable);
+              if (output.length) selectedSource = 'visual-grid';
+            }
+            const signature = docs.map(doc => {
+              let href = '';
+              try { href = doc.location && doc.location.href || ''; } catch (_) {}
+              return href + ' ' + (doc.title || '') + ' ' +
+                String(doc.documentElement && doc.documentElement.innerHTML || '').slice(0, 120000);
+            }).join('\\n');
+            const fingerprintMap = new Map();
+            function fingerprint(id, score, evidence) {
+              let item = fingerprintMap.get(id);
+              if (!item) item = {id, score: 0, evidence: []};
+              item.score += score;
+              if (evidence && item.evidence.indexOf(evidence) < 0) item.evidence.push(evidence);
+              fingerprintMap.set(id, item);
+            }
+            if (/zfsoft|正方软件|\\/jwglxt\\//i.test(signature)) {
+              fingerprint('zhengfang', 6, '厂商脚本或路径');
+            }
+            if (/强智|qiangzhi|jw\\.glite|\\/jsxsd\\//i.test(signature)) {
+              fingerprint('qiangzhi', 6, '厂商脚本或路径');
+            }
+            if (/青果|kingosoft|URP综合教务|\\/urp\\//i.test(signature)) {
+              fingerprint('kingosoft', 6, '厂商脚本或路径');
+            }
+            if (/\\/jwapp\\/sys\\/|publicfrreport|emap/i.test(signature)) {
+              fingerprint('emap', 6, 'EMAP 页面结构');
+            }
+            if (/\\/eams\\/|TaskActivity|beangle/i.test(signature)) {
+              fingerprint('eams', 6, 'Beangle 页面结构');
+            }
+            if (runtimeActivities > 0) {
+              fingerprint('eams', 12, '运行时活动对象');
+            }
+            for (const root of roots) {
+              if (root.querySelector('#kbgrid_table_0,#table1,#Table1')) {
+                fingerprint('zhengfang', 8, '课表表格');
+              }
+              if (root.querySelector('#kbtable .kbcontent,#kbtable')) {
+                fingerprint('qiangzhi', 8, 'kbtable 课表');
+              }
+              if (root.querySelector('[data-kcmc],[data-jsxm],[data-zcd]')) {
+                fingerprint('emap', 4, '课程字段');
+              }
+              if (root.querySelector('.Nsb_table,.Nsb_r_list,[class*="kingosoft"],table[id*="kb"]')) {
+                fingerprint('kingosoft', 5, '课表节点');
+              }
+              if (root.querySelector('[id*="courseTableForStd"],[class*="TaskActivity"]')) {
+                fingerprint('eams', 5, '活动课表节点');
+              }
+            }
+            const fingerprints = Array.from(fingerprintMap.values())
+              .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+            const strongest = fingerprints.length && fingerprints[0].score >= 4
+              ? fingerprints[0] : null;
             let detected = 'generic';
-            if (/zfsoft|正方软件|jwglxt/i.test(html)) detected = 'zhengfang';
-            else if (/强智|qiangzhi|jw\\.glite/i.test(html)) detected = 'qiangzhi';
-            else if (/青果|kingosoft|URP综合教务/i.test(html)) detected = 'kingosoft';
+            let layout = 'generic';
+            if (strongest) {
+              layout = strongest.id;
+              if (['zhengfang', 'qiangzhi', 'kingosoft', 'eams', 'emap'].includes(strongest.id)) {
+                detected = strongest.id;
+              }
+            } else if (visualCandidates > 0) {
+              layout = 'visual-grid';
+            } else if (output.length > 0) {
+              layout = 'table';
+            }
             window.__qianxiImportPayload = {
               adapter: detected,
-              source: 'page-dom',
+              layout,
+              source: selectedSource,
               sourceUrl: location.href,
               pageTitle: document.title || '',
               term: '',
               diagnostics: {
                 frames: docs.length - 1,
-                tables: document.querySelectorAll('table').length,
-                candidates: output.length
+                shadowRoots: Math.max(0, roots.length - docs.length),
+                tables: roots.reduce((count, root) => count + root.querySelectorAll('table').length, 0),
+                candidates: output.length,
+                missingWeekCandidates,
+                qiangzhiFallback,
+                structuredCandidates,
+                vueRoots,
+                domPassSkipped,
+                runtimeActivities,
+                recordRows,
+                visualCandidates,
+                visualDays,
+                visualSections,
+                visualNodes,
+                fingerprints,
+                samples: output.slice(0, 3).map(item => clean(item.name || item.text || '')
+                  .replace(/\\n+/g, ' / ').slice(0, 96))
               },
               items: output
             };
@@ -225,695 +1057,4 @@ public final class ImportScript {
         })();
         """;
 
-    private static final String NEUQ_EAMS_API = """
-        (function () {
-          window.__qianxiImportState = 'loading';
-          window.__qianxiImportPayload = null;
-          window.__qianxiImportError = '';
-
-          const output = [];
-          const seen = new Set();
-          let scannedTables = 0;
-
-          function clean(value) {
-            return String(value || '').replace(/\\u00a0/g, ' ').replace(/[ \\t]+/g, ' ')
-              .replace(/\\n[ \\t]+/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
-          }
-          async function fetchText(url, options) {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 15000);
-            try {
-              const response = await fetch(url, Object.assign({
-                credentials: 'include', signal: controller.signal,
-                headers: {'X-Requested-With': 'XMLHttpRequest'}
-              }, options || {}));
-              if (!response.ok) throw new Error('EAMS 请求失败（HTTP ' + response.status + '）');
-              return {text: await response.text(), url: response.url};
-            } finally {
-              clearTimeout(timer);
-            }
-          }
-          function isLoginPage(result) {
-            return /authserver\\/login|name=["']username["']|统一身份认证/i.test(
-              (result.url || '') + ' ' + (result.text || ''));
-          }
-          function documentOf(html) {
-            return new DOMParser().parseFromString(html, 'text/html');
-          }
-          function namedValue(doc, name) {
-            const element = doc.querySelector('[name="' + name + '"]');
-            if (!element) return '';
-            if (element.tagName === 'SELECT') {
-              const selected = element.querySelector('option:checked,option[selected]');
-              return clean((selected && selected.value) || element.value || '');
-            }
-            return clean(element.value || element.getAttribute('value') || '');
-          }
-          function firstNumber(html, patterns) {
-            for (const pattern of patterns) {
-              const match = html.match(pattern);
-              if (match) return match[1];
-            }
-            return '';
-          }
-          function discoverContext(html) {
-            const doc = documentOf(html);
-            const ids = namedValue(doc, 'ids') || namedValue(doc, 'student.id') ||
-              firstNumber(html, [
-                /name=["']ids["'][^>]*value=["'](\\d+)/i,
-                /["']ids["']\\s*,\\s*["']?(\\d+)/i,
-                /(?:studentId|stdId|ids)\\s*[:=]\\s*["']?(\\d+)/i
-              ]);
-            const semester = namedValue(doc, 'semester.id') ||
-              firstNumber(html, [
-                /name=["']semester\\.id["'][^>]*value=["'](\\d+)/i,
-                /["']semester\\.id["']\\s*,\\s*["']?(\\d+)/i,
-                /semester\\.id\\s*[:=]\\s*["']?(\\d+)/i
-              ]);
-            return {ids, semester};
-          }
-          function nodeText(node) {
-            return clean(node.innerText || node.textContent ||
-              (node.getAttribute && (node.getAttribute('title') || node.getAttribute('aria-label'))) || '');
-          }
-          function dayFromHeader(value) {
-            const match = clean(value).replace(/\\s+/g, '').match(/^(?:星期|周)?([一二三四五六日天])$/);
-            if (!match) return 0;
-            if (match[1] === '日' || match[1] === '天') return 7;
-            return '一二三四五六'.indexOf(match[1]) + 1;
-          }
-          function sectionFrom(value, fallback) {
-            const match = clean(value).match(/(?:第)?(\\d{1,2})(?:\\s*[-~至—]\\s*\\d{1,2})?\\s*节/);
-            return match ? Number(match[1]) : fallback;
-          }
-          function add(day, section, endSection, node) {
-            day = Number(day); section = Number(section); endSection = Number(endSection || section);
-            const text = nodeText(node);
-            if (!(day >= 1 && day <= 7) || !(section >= 1 && section <= 30)
-                || text.length < 2 || /^(无|暂无|--|-)$/.test(text)) return;
-            const key = [day, section, endSection, text].join('|');
-            if (seen.has(key)) return;
-            seen.add(key);
-            output.push({day, section, endSection: Math.max(section, endSection), text,
-              title: clean(node.getAttribute && (node.getAttribute('title') || ''))});
-          }
-          function addCell(day, section, cell) {
-            const endSection = section + Math.max(1, Number(cell.rowSpan || 1)) - 1;
-            const blocks = Array.from(cell.querySelectorAll(
-              ':scope > .kbcontent,:scope > .course,:scope > .activity,' +
-              ':scope > [class*="course"],:scope > [class*="activity"]'))
-              .filter(node => nodeText(node).length > 1);
-            if (blocks.length) blocks.forEach(node => add(day, section, endSection, node));
-            else add(day, section, endSection, cell);
-          }
-          function scanTable(table) {
-            scannedTables++;
-            const rows = Array.from(table.rows || []);
-            const grid = [];
-            rows.forEach((row, rowIndex) => {
-              if (!grid[rowIndex]) grid[rowIndex] = [];
-              let column = 0;
-              for (const cell of Array.from(row.cells || [])) {
-                while (grid[rowIndex][column]) column++;
-                const rowSpan = Math.max(1, Number(cell.rowSpan || 1));
-                const colSpan = Math.max(1, Number(cell.colSpan || 1));
-                for (let r = 0; r < rowSpan; r++) {
-                  if (!grid[rowIndex + r]) grid[rowIndex + r] = [];
-                  for (let c = 0; c < colSpan; c++) {
-                    grid[rowIndex + r][column + c] = {cell, originRow: rowIndex};
-                  }
-                }
-                column += colSpan;
-              }
-            });
-            const width = grid.reduce((max, row) => Math.max(max, row.length), 0);
-            if (width < 7) return;
-            const columns = {};
-            for (let row = 0; row < Math.min(5, grid.length); row++) {
-              for (let column = 0; column < grid[row].length; column++) {
-                const entry = grid[row][column];
-                const day = entry ? dayFromHeader(nodeText(entry.cell)) : 0;
-                if (day && columns[day] === undefined) columns[day] = column;
-              }
-            }
-            if (Object.keys(columns).length !== 7) {
-              const start = Math.max(0, width - 7);
-              for (let day = 1; day <= 7; day++) columns[day] = start + day - 1;
-            }
-            grid.forEach((row, rowIndex) => {
-              const labels = row.slice(0, Math.min(4, row.length)).filter(Boolean)
-                .map(entry => nodeText(entry.cell)).join(' ');
-              const section = sectionFrom(labels, Math.max(1, rowIndex));
-              for (let day = 1; day <= 7; day++) {
-                const entry = row[columns[day]];
-                if (entry && entry.originRow === rowIndex) addCell(day, section, entry.cell);
-              }
-            });
-          }
-          function scanDocument(doc) {
-            for (const table of doc.querySelectorAll('table')) scanTable(table);
-          }
-
-          // Beangle EAMS ("courseTableForStd") does NOT put the week range in the rendered cell
-          // text — only a compact "第几节" label. The real schedule lives in inline JS at the bottom
-          // of the returned HTML, emitted like this (one activity, bound to every unit it occupies):
-          //   var actTeacherId = "..."; var actTeacherName = "张旭";
-          //   var activity = new TaskActivity(actTeacherId,actTeacherName,
-          //       "课程号(课程名)","高等数学","roomId","综合楼1208","001111111100000000000",null,null);
-          //   index =2*unitCount+2;  table0.activities[index][...] = activity;
-          //   index =2*unitCount+3;  table0.activities[index][...] = activity;   // multi-period span
-          // The grid index is the VARIABLE `index`, not a literal — the real day/unit are in the
-          // `index = day*unitCount + unit` expression (both 0-based). The 7th constructor argument
-          // is a binary week string (position n = week n has class). Parsing this gives the true
-          // weeks, weekday and unit that the rendered table cannot.
-          function extractArgList(html, startIndex) {
-            // startIndex points just after the opening '(' of new TaskActivity(. Walk to the
-            // matching ')', respecting quoted strings so commas/parens inside them don't confuse us.
-            let i = startIndex, depth = 1, quote = '';
-            while (i < html.length && depth > 0) {
-              const ch = html[i];
-              if (quote) {
-                if (ch === '\\\\') { i += 2; continue; }
-                if (ch === quote) quote = '';
-              } else if (ch === '"' || ch === "'") {
-                quote = ch;
-              } else if (ch === '(') {
-                depth++;
-              } else if (ch === ')') {
-                depth--;
-              }
-              i++;
-            }
-            return {argStr: html.slice(startIndex, i - 1), end: i};
-          }
-          function parseTaskActivities(html, unitCount) {
-            const items = [];
-            const uc = unitCount > 0 ? unitCount : 12;
-            const marker = 'new TaskActivity(';
-            let pos = 0;
-            while (true) {
-              const at = html.indexOf(marker, pos);
-              if (at < 0) break;
-              const parsed = extractArgList(html, at + marker.length);
-              const args = splitArgs(parsed.argStr);
-              // Every `index = day*unitCount+unit; table0.activities[index]...` binding for this
-              // activity sits between it and the next `new TaskActivity(` (cap the window so a
-              // trailing activity without a successor cannot run away over the whole document).
-              const next = html.indexOf(marker, parsed.end);
-              const regionEnd = next < 0 ? Math.min(html.length, parsed.end + 4000) : next;
-              const region = html.slice(parsed.end, regionEnd);
-              pos = next < 0 ? html.length : next;
-              if (!args || args.length < 7) continue;
-              const courseName = stripQuotes(args[3]) || stripQuotes(args[2]);
-              const room = stripQuotes(args[5]);
-              const weekBin = stripQuotes(args[6]);
-              const teacher = stripQuotes(args[1]);
-              if (!courseName || !/^[01]+$/.test(weekBin)) continue;
-              const idxRe = /index\\s*=\\s*(\\d+)\\s*\\*\\s*(?:unitCount|\\d+)\\s*\\+\\s*(\\d+)/g;
-              let mm;
-              while ((mm = idxRe.exec(region)) !== null) {
-                const day = Number(mm[1]) + 1;        // 0-based weekday → 1-based (Mon=1)
-                const startUnit = Number(mm[2]) + 1;  // 0-based unit → 1-based node
-                if (day >= 1 && day <= 7 && startUnit >= 1 && startUnit <= 30) {
-                  items.push({courseName, teacher, room, weekBin, day, startUnit});
-                }
-              }
-            }
-            return items;
-          }
-          function splitArgs(str) {
-            // Split a JS argument list on top-level commas, respecting quotes.
-            const out = [];
-            let cur = '', quote = '';
-            for (let i = 0; i < str.length; i++) {
-              const ch = str[i];
-              if (quote) {
-                if (ch === quote && str[i - 1] !== '\\\\') quote = '';
-                cur += ch;
-              } else if (ch === '"' || ch === "'") {
-                quote = ch; cur += ch;
-              } else if (ch === ',') {
-                out.push(cur.trim()); cur = '';
-              } else cur += ch;
-            }
-            if (cur.trim()) out.push(cur.trim());
-            return out;
-          }
-          function stripQuotes(v) {
-            if (v == null) return '';
-            return clean(String(v).replace(/^\\s*["']|["']\\s*$/g, ''));
-          }
-          function weekBinToText(bin) {
-            // beangle's vaildWeeks string is 1-INDEXED: position 0 is a placeholder and is always
-            // '0'; position n (n >= 1) means "week n has class". Pushing `i + 1` was off-by-one and
-            // shifted every course forward one week (e.g. real 1-14 → shown as 2-15). Push `i`.
-            const weeks = [];
-            for (let i = 0; i < bin.length; i++) if (bin[i] === '1') weeks.push(i);
-            if (!weeks.length) return '';
-            const parts = [];
-            let s = weeks[0], p = weeks[0];
-            for (let i = 1; i < weeks.length; i++) {
-              if (weeks[i] === p + 1) { p = weeks[i]; continue; }
-              parts.push(s === p ? '' + s : s + '-' + p);
-              s = weeks[i]; p = weeks[i];
-            }
-            parts.push(s === p ? '' + s : s + '-' + p);
-            return parts.join(',') + '周';
-          }
-          function unitCountOf(html) {
-            const m = html.match(/unitCount\\s*=\\s*(\\d+)/);
-            return m ? Number(m[1]) : 0;
-          }
-          function emitActivities(activities) {
-            // Adjacent units of the same course/week/day are one multi-period class; merge them
-            // into a section..endSection range so a 2-node lecture shows as one tall card.
-            const byKey = {};
-            for (const a of activities) {
-              const key = [a.courseName, a.teacher, a.room, a.weekBin, a.day].join('\\u0000');
-              (byKey[key] || (byKey[key] = [])).push(a);
-            }
-            for (const key of Object.keys(byKey)) {
-              const group = byKey[key].sort((x, y) => x.startUnit - y.startUnit);
-              let run = [group[0]];
-              const flush = () => {
-                const first = run[0], last = run[run.length - 1];
-                const weeks = weekBinToText(first.weekBin);
-                output.push({
-                  day: first.day,
-                  section: first.startUnit,
-                  endSection: last.startUnit,
-                  name: first.courseName,
-                  teacher: first.teacher,
-                  location: first.room,
-                  weeks: weeks,
-                  text: [first.courseName, first.teacher, first.room, weeks].filter(Boolean).join('\\n'),
-                  title: first.courseName
-                });
-              };
-              for (let i = 1; i < group.length; i++) {
-                if (group[i].startUnit === run[run.length - 1].startUnit + 1) run.push(group[i]);
-                else { flush(); run = [group[i]]; }
-              }
-              flush();
-            }
-          }
-          // The real fix for the "courseName+\\"" / "actTeacherName.join(',')" symptom: NEUQ's
-          // `new TaskActivity(...)` is called with JS EXPRESSIONS (variables, string concatenation,
-          // .join()), not literals — the constructor source text can never resolve them, only a JS
-          // runtime can. But we don't need to re-execute anything: when the user taps "拉取课表" while
-          // the EAMS timetable page is open in the WebView, its TaskActivity_01.js has already run
-          // and populated `window.table0.activities` with fully evaluated activity objects whose
-          // fields are real strings (courseName, teachers, room, vaildWeeks). Reading those beats
-          // any parse/replay strategy. Same-origin iframes discovered on the page (e.g. an EAMS
-          // sub-frame that hosts the actual timetable) are searched too.
-          //
-          // Beangle's TaskActivity constructor sets fields like:
-          //   this.teacherId, this.teachers, this.courseId, this.courseName,
-          //   this.roomId, this.room, this.vaildWeeks (sic — "vaild", not "valid")
-          // Slots in activities[] are Beangle "OpaqueArray" objects: numeric indices 0..count-1
-          // hold TaskActivity instances, and .count is the occupancy for that unit.
-          function harvestFromWindow(win) {
-            const items = [];
-            let table = null;
-            let unitCount = 0;
-            try { unitCount = Number(win.unitCount) || 0; } catch (e) {}
-            try {
-              for (const k in win) {
-                try {
-                  if (/^table\\d+$/.test(k) && win[k] && win[k].activities) {
-                    table = win[k]; break;
-                  }
-                } catch (e) {}
-              }
-            } catch (e) {}
-            if (!table) {
-              try { if (win.table0 && win.table0.activities) table = win.table0; } catch (e) {}
-            }
-            if (!table || !table.activities) return items;
-            if (!unitCount) unitCount = 12;
-            const acts = table.activities;
-            for (let i = 0; i < acts.length; i++) {
-              const slot = acts[i];
-              if (!slot) continue;
-              const count = typeof slot.count === 'number'
-                ? slot.count : (Array.isArray(slot) ? slot.length : 0);
-              const entries = [];
-              for (let j = 0; j < count; j++) {
-                try { if (slot[j]) entries.push(slot[j]); } catch (e) {}
-              }
-              // Some Beangle builds store activities directly in a flat array without a .count.
-              if (!entries.length && slot && typeof slot === 'object'
-                  && (slot.courseName || slot.__qx)) {
-                entries.push(slot);
-              }
-              for (const a of entries) {
-                if (!a) continue;
-                let courseName = '';
-                let teacher = '';
-                let room = '';
-                let weekBin = '';
-                // First choice: the constructed object's real string fields.
-                try {
-                  courseName = clean(String(a.courseName || a.course || ''));
-                  teacher = clean(String(a.teachers || a.teacherName || a.teacher || ''));
-                  room = clean(String(a.room || a.roomName || ''));
-                  weekBin = String(a.vaildWeeks || a.validWeeks || a.weeks || '');
-                } catch (e) {}
-                // Second choice: our capture shim stored the original arguments on __qx.
-                if ((!courseName || !weekBin) && a.__qx) {
-                  const args = a.__qx;
-                  if (!courseName) {
-                    courseName = clean(String(args[3] != null ? args[3] : ''))
-                      || clean(String(args[2] != null ? args[2] : ''));
-                  }
-                  if (!teacher) teacher = clean(String(args[1] != null ? args[1] : ''));
-                  if (!room) room = clean(String(args[5] != null ? args[5] : ''));
-                  if (!weekBin) weekBin = String(args[6] != null ? args[6] : '');
-                }
-                if (!courseName || !/^[01]+$/.test(weekBin)) continue;
-                const day = Math.floor(i / unitCount) + 1;
-                const startUnit = (i % unitCount) + 1;
-                if (day >= 1 && day <= 7 && startUnit >= 1 && startUnit <= 30) {
-                  items.push({courseName, teacher, room, weekBin, day, startUnit});
-                }
-              }
-            }
-            return items;
-          }
-          function harvestFromCurrentPage() {
-            // Read the live EAMS page the WebView is showing: this is the only place TaskActivity
-            // arguments are already evaluated, no matter how they were written in source.
-            const wins = [window];
-            try {
-              for (const frame of document.querySelectorAll('iframe')) {
-                try { if (frame.contentWindow) wins.push(frame.contentWindow); } catch (e) {}
-              }
-            } catch (e) {}
-            for (const w of wins) {
-              const out = harvestFromWindow(w);
-              if (out.length) return out;
-            }
-            return [];
-          }
-          // Fallback when the user hasn't opened the timetable page: fetch it ourselves and inject
-          // it into a same-origin iframe via document.write. `about:blank` inherits our origin, so
-          // TaskActivity_01.js loads normally, cookies attach, and the inline scripts evaluate.
-          // (srcdoc puts the iframe under an opaque origin — subresource loading and cross-frame
-          // property access misbehave there, which is why the 1.17.2/1.17.3 srcdoc path silently
-          // produced no activities.)
-          function injectCapture(html) {
-            // Belt-and-braces: swap in a TaskActivity shim BEFORE the real one loads, so if any
-            // caller passes literal expressions we still record them for the fallback read path.
-            const cap = '<script>(function(){var R=window.TaskActivity;'
-              + 'function T(){try{if(R)R.apply(this,arguments);}catch(e){}'
-              + 'try{this.__qx=Array.prototype.slice.call(arguments);}catch(e){}return this;}'
-              + 'try{if(R&&R.prototype)T.prototype=R.prototype;}catch(e){}window.TaskActivity=T;})();</script>';
-            const low = html.toLowerCase();
-            let at = low.indexOf('taskactivity_01.js');
-            if (at >= 0) {
-              const close = low.indexOf('</script>', at);
-              if (close >= 0) {
-                const ins = close + 9;
-                return html.slice(0, ins) + cap + html.slice(ins);
-              }
-            }
-            at = html.indexOf('new TaskActivity(');
-            if (at >= 0) {
-              const start = low.lastIndexOf('<script', at);
-              if (start >= 0) return html.slice(0, start) + cap + html.slice(start);
-            }
-            return cap + html;
-          }
-          function renderAndHarvest(html) {
-            return new Promise(resolve => {
-              const frame = document.createElement('iframe');
-              frame.style.cssText =
-                'position:absolute;left:-9999px;top:0;width:1200px;height:2400px;visibility:hidden;';
-              // about:blank inherits the parent's origin — scripts inside see same-origin cookies
-              // and can load TaskActivity_01.js off the EAMS server normally.
-              frame.src = 'about:blank';
-              let finished = false;
-              const finish = () => {
-                if (finished) return;
-                finished = true;
-                let out = [];
-                try { out = harvestFromWindow(frame.contentWindow || {}); } catch (e) {}
-                try { frame.remove(); } catch (e) {}
-                resolve(out);
-              };
-              document.body.appendChild(frame);
-              const write = () => {
-                try {
-                  const doc = frame.contentWindow.document;
-                  const base = '<base href="' + location.origin + '/eams/">';
-                  let payload = injectCapture(html);
-                  payload = /<head[^>]*>/i.test(payload)
-                    ? payload.replace(/<head[^>]*>/i, match => match + base)
-                    : base + payload;
-                  doc.open();
-                  doc.write(payload);
-                  doc.close();
-                } catch (e) {
-                  finish();
-                  return;
-                }
-                // Give TaskActivity_01.js + inline bootstrap time to run.
-                setTimeout(finish, 4000);
-              };
-              // about:blank load is usually synchronous but wait a tick to be safe.
-              setTimeout(write, 60);
-              setTimeout(finish, 12000);
-            });
-          }
-          function renderAndScan(html) {
-            return new Promise(resolve => {
-              const frame = document.createElement('iframe');
-              frame.style.display = 'none';
-              let finished = false;
-              const done = () => {
-                if (finished) return;
-                finished = true;
-                try { if (frame.contentDocument) scanDocument(frame.contentDocument); } catch (_) {}
-                frame.remove();
-                resolve();
-              };
-              frame.onload = () => setTimeout(done, 1200);
-              const base = '<base href="' + location.origin + '/eams/">';
-              frame.srcdoc = /<head[^>]*>/i.test(html)
-                ? html.replace(/<head[^>]*>/i, match => match + base) : base + html;
-              document.body.appendChild(frame);
-              setTimeout(done, 5000);
-            });
-          }
-
-          (async function () {
-            try {
-              if (!/^jwxt\\.neuq\\.edu\\.cn$/i.test(location.hostname)) {
-                throw new Error('东北大学教务适配器无法识别当前域名');
-              }
-              const currentHtml = document.documentElement ? document.documentElement.outerHTML : '';
-              const landing = await fetchText('/eams/courseTableForStd.action');
-              if (isLoginPage(landing)) throw new Error('登录状态已失效，请重新登录统一身份认证');
-              let context = discoverContext(landing.text);
-              if (!context.ids || !context.semester) {
-                const current = discoverContext(currentHtml);
-                context = {ids: context.ids || current.ids, semester: context.semester || current.semester};
-              }
-              if (!context.ids) {
-                throw new Error('未获取到学生课表 ID，请先在教务菜单中打开一次“我的课表”');
-              }
-              if (!context.semester) {
-                throw new Error('未获取到当前学期，请在“我的课表”页面选择学期后重试');
-              }
-
-              const form = new URLSearchParams();
-              form.append('ignoreHead', '1');
-              form.append('showPrintAndExport', '1');
-              form.append('setting.kind', 'std');
-              form.append('ids', context.ids);
-              form.append('semester.id', context.semester);
-              form.append('startWeek', '1');
-              const result = await fetchText('/eams/courseTableForStd!courseTable.action', {
-                method: 'POST', body: form,
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                  'X-Requested-With': 'XMLHttpRequest'
-                }
-              });
-              if (isLoginPage(result)) throw new Error('登录状态已失效，请重新登录统一身份认证');
-
-              // Strategy, in order of fidelity:
-              // 1. Read `table0.activities` from the LIVE page/frames the user has already loaded —
-              //    TaskActivity has run there, so courseName/teachers/room/vaildWeeks are real strings.
-              // 2. Render the fetched HTML in a same-origin about:blank iframe and read the same
-              //    fields — used when the user tapped 拉取 from a non-timetable page.
-              // 3. Text-parse the constructor source (works only for literal-argument deployments).
-              // 4. DOM scan the rendered timetable cells as last resort.
-              const unitCount = unitCountOf(result.text);
-              let activities = harvestFromCurrentPage();
-              if (!activities.length) {
-                try { activities = await renderAndHarvest(result.text); } catch (e) { activities = []; }
-              }
-              if (!activities.length) activities = parseTaskActivities(result.text, unitCount);
-              if (activities.length) {
-                emitActivities(activities);
-              } else {
-                scanDocument(documentOf(result.text));
-                if (!output.length) await renderAndScan(result.text);
-              }
-
-              window.__qianxiImportPayload = {
-                adapter: 'neuq-eams',
-                source: 'neuq-eams',
-                sourceUrl: location.origin + '/eams/courseTableForStd.action',
-                pageTitle: '东北大学秦皇岛个人课表',
-                term: context.semester,
-                campus: '东北大学秦皇岛分校',
-                diagnostics: {frames: 0, tables: scannedTables, candidates: output.length},
-                items: output
-              };
-              window.__qianxiImportState = 'done';
-            } catch (error) {
-              window.__qianxiImportError = String(error && error.message ? error.message : error);
-              window.__qianxiImportState = 'error';
-            }
-          })();
-        })();
-        """;
-
-    private static final String NEU_API = """
-        (function () {
-          window.__qianxiImportState = 'loading';
-          window.__qianxiImportPayload = null;
-          window.__qianxiImportError = '';
-
-          function clean(value) {
-            return String(value || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
-          }
-          async function fetchJson(url, options) {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 12000);
-            try {
-              const response = await fetch(url, Object.assign({
-                credentials: 'include', signal: controller.signal
-              }, options || {}));
-              if (!response.ok) throw new Error('教务接口请求失败（HTTP ' + response.status + '）');
-              const raw = await response.text();
-              try {
-                return JSON.parse(raw);
-              } catch (_) {
-                if (/^\\s*</.test(raw)) {
-                  throw new Error('登录状态已失效，请重新登录东北大学教务系统');
-                }
-                throw new Error('教务接口返回了无法识别的数据');
-              }
-            } finally {
-              clearTimeout(timer);
-            }
-          }
-          function firstArray(value) {
-            if (Array.isArray(value)) return value;
-            if (!value || typeof value !== 'object') return [];
-            for (const key of ['campusList', 'rows', 'data', 'list']) {
-              if (Array.isArray(value[key])) return value[key];
-            }
-            for (const key of Object.keys(value)) {
-              if (Array.isArray(value[key])) return value[key];
-            }
-            return [];
-          }
-          function teacherOf(item) {
-            const raw = clean(item.weeksAndTeachers || item.teacherName || item.teachers || '');
-            if (!raw) return '';
-            const parts = raw.split('/');
-            return clean(parts[parts.length - 1].replace(/\\[主讲\\]/g, ''));
-          }
-          function detailOf(raw, item) {
-            const text = clean(raw);
-            const match = text.match(/^([0-9\\s,，、\\-~至—()（）单双周]+)\\s*(.*)$/);
-            return {
-              weeks: match ? clean(match[1]) : clean(item.weekDescription || item.weeks || ''),
-              location: match ? clean(match[2]) : clean(item.roomName || item.location || '')
-            };
-          }
-
-          (async function () {
-            try {
-              if (!/jwxt\\.neu\\.edu\\.cn$/i.test(location.hostname)) {
-                throw new Error('东北大学适配器只能在 https://jwxt.neu.edu.cn/ 内运行');
-              }
-              const userData = await fetchJson('/jwapp/sys/homeapp/api/home/currentUser.do');
-              const datas = userData && userData.datas ? userData.datas : {};
-              const welcome = datas.welcomeInfo || datas;
-              const termCode = clean(welcome.xnxqdm || welcome.termCode || welcome.semesterCode || '');
-              if (!termCode) throw new Error('未获取到当前学期，请先进入教务首页并选择学期');
-
-              const campusData = await fetchJson(
-                '/jwapp/sys/homeapp/api/home/student/getMyScheduledCampus.do?termCode=' +
-                encodeURIComponent(termCode));
-              const campuses = firstArray(campusData ? campusData.datas : null);
-              if (!campuses.length) throw new Error('未获取到校区信息，请确认当前账号已有排课数据');
-
-              const output = [];
-              const seen = new Set();
-              for (const campus of campuses) {
-                const campusCode = clean(campus.id || campus.code || campus.campusCode || '');
-                if (!campusCode) continue;
-                const form = new URLSearchParams();
-                form.append('termCode', termCode);
-                form.append('campusCode', campusCode);
-                form.append('type', 'term');
-                const scheduleData = await fetchJson(
-                  '/jwapp/sys/homeapp/api/home/student/getMyScheduleDetail.do', {
-                    method: 'POST', body: form,
-                    headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'}
-                  });
-                const scheduleDatas = scheduleData && scheduleData.datas ? scheduleData.datas : {};
-                const arranged = Array.isArray(scheduleDatas.arrangedList)
-                  ? scheduleDatas.arrangedList : firstArray(scheduleDatas);
-                for (const item of arranged) {
-                  const details = Array.isArray(item.titleDetail) && item.titleDetail.length > 1
-                    ? item.titleDetail.slice(1) : [item.weekDescription || item.weeks || ''];
-                  for (const rawDetail of details) {
-                    const detail = detailOf(rawDetail, item);
-                    const record = {
-                      name: clean(item.courseName || item.name || ''),
-                      teacher: teacherOf(item),
-                      location: detail.location,
-                      weeks: detail.weeks,
-                      day: Number(item.dayOfWeek),
-                      section: Number(item.beginSection),
-                      endSection: Number(item.endSection || item.beginSection),
-                      startTime: clean(item.beginTime || item.startTime || ''),
-                      endTime: clean(item.endTime || item.finishTime || ''),
-                      text: clean(item.courseName || item.name || ''),
-                      title: clean(rawDetail)
-                    };
-                    const key = [record.name, record.day, record.section, record.endSection,
-                      record.teacher, record.location, record.weeks].join('|');
-                    if (record.name && record.day && record.section && !seen.has(key)) {
-                      seen.add(key);
-                      output.push(record);
-                    }
-                  }
-                }
-              }
-              window.__qianxiImportPayload = {
-                adapter: 'neu',
-                source: 'neu-api',
-                sourceUrl: location.origin,
-                pageTitle: document.title || '',
-                term: termCode,
-                campus: campuses.map(c => clean(c.name || c.text || c.label || c.id)).join('、'),
-                diagnostics: { campuses: campuses.length, candidates: output.length },
-                items: output
-              };
-              window.__qianxiImportState = 'done';
-            } catch (error) {
-              window.__qianxiImportError = String(error && error.message ? error.message : error);
-              window.__qianxiImportState = 'error';
-            }
-          })();
-        })();
-        """;
 }

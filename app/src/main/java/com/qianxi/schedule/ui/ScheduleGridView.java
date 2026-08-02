@@ -153,7 +153,10 @@ public final class ScheduleGridView extends LinearLayout {
         ScheduleGridMetrics metrics = ScheduleGridMetrics.fromItemHeight(itemHeightDp);
         int itemHeight = Ui.dp(context, metrics.itemHeightDp);
         int marTop = Ui.dp(context, MAR_TOP_DP);
-        int periods = Math.max(1, classTimes.size());
+        // Courses carry their own node numbers, which can reach past the active 作息 (a table with
+        // only the afternoon periods, or a schedule imported under a longer one). Grow the grid to
+        // whatever the courses actually use so nothing is drawn below the visible area.
+        int periods = Math.max(Math.max(1, classTimes.size()), maxNodeUsed(courses));
         int gridHeight = periods * (itemHeight + marTop) + marTop;
 
         // Left time-axis column: one cell per period. WakeUp applies the exact same item height to
@@ -162,8 +165,10 @@ public final class ScheduleGridView extends LinearLayout {
         LinearLayout axis = new LinearLayout(context);
         axis.setOrientation(VERTICAL);
         for (int i = 0; i < periods; i++) {
-            AppSettings.ClassTime slot = classTimes.get(i);
-            TextView cell = buildTimeAxisCell(context, slot, metrics);
+            AppSettings.ClassTime slot = i < classTimes.size() ? classTimes.get(i) : null;
+            TextView cell = slot != null
+                    ? buildTimeAxisCell(context, slot, metrics)
+                    : buildUnconfiguredAxisCell(context, i + 1, metrics);
             LinearLayout.LayoutParams cellParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, itemHeight);
             cellParams.topMargin = marTop;
@@ -191,6 +196,39 @@ public final class ScheduleGridView extends LinearLayout {
             columnParams.rightMargin = Ui.dp(context, 1);
             body.addView(column, columnParams);
         }
+    }
+
+    /**
+     * Highest period number any visible course occupies, so the grid can be extended past the
+     * active 作息 rather than clipping the course away.
+     */
+    private int maxNodeUsed(List<Course> courses) {
+        int max = 0;
+        for (Course c : courses) {
+            int end = c.startNode >= 1 && c.step >= 1
+                    ? c.endNode()
+                    : ScheduleTime.nodeRange(classTimes, c.startMinute, c.endMinute)[1];
+            if (end > max) max = end;
+        }
+        return Math.min(max, 30);
+    }
+
+    /**
+     * Axis label for a period the active 作息 does not define. Shows the number without times, which
+     * is honest about the gap and keeps the row clickable/aligned with its course card.
+     */
+    private TextView buildUnconfiguredAxisCell(Context context, int period,
+                                               ScheduleGridMetrics metrics) {
+        TextView cell = new TextView(context);
+        cell.setText(String.valueOf(period));
+        cell.setTextColor(Ui.MUTED);
+        cell.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
+        cell.setGravity(Gravity.CENTER);
+        cell.setIncludeFontPadding(false);
+        cell.setTextSize(TypedValue.COMPLEX_UNIT_SP, metrics.periodTextSp);
+        cell.setContentDescription("第" + period + "节，当前作息未设置时间");
+        cell.setFontFeatureSettings("tnum");
+        return cell;
     }
 
     private TextView buildTimeAxisCell(Context context, AppSettings.ClassTime slot,

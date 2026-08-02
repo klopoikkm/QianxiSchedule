@@ -43,6 +43,7 @@ import android.widget.Toast;
 import com.qianxi.schedule.data.AppSettings;
 import com.qianxi.schedule.data.Course;
 import com.qianxi.schedule.data.CourseDatabase;
+import com.qianxi.schedule.importer.AcademicShellRepair;
 import com.qianxi.schedule.importer.AcademicWebPolicy;
 import com.qianxi.schedule.importer.ImportAdapter;
 import com.qianxi.schedule.importer.ImportParser;
@@ -55,34 +56,17 @@ import org.json.JSONTokener;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 public final class ImportActivity extends Activity {
     private static final int MAX_POLL_ATTEMPTS = 160;
-    // Same-origin virtual path answered by the interceptor with the bundled jQuery. Injected
-    // into EAMS main documents whose HTML carries no jQuery reference of its own.
-    private static final String LOCAL_JQUERY_PATH = "/__qianxi__/jquery-1.7.2.min.js";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<SchoolProfile> profiles = new ArrayList<>();
     private final List<WebView> browserStack = new ArrayList<>();
-    // Diagnostics: WebVPN can silently fail to load CSS/JS/AJAX subresources, leaving a bare
-    // HTML skeleton. The WebView surfaces those failures only through onReceived*Error for
-    // subframes and the JS console, both of which we record here so the user can report them.
+    // Subframe, HTTP and JavaScript errors help distinguish a portal failure from parser failure.
     private static final int MAX_DIAGNOSTICS = 200;
     private final List<String> diagnostics = new ArrayList<>();
-    // The WebVPN proxy base (https://vpn.neuq.edu.cn/http/<prefix>) for the page currently being
-    // shown, used to re-route raw internal resource links that the proxy failed to rewrite.
-    private volatile String webVpnBase;
-    // URL of the page currently loading/shown, mirrored here on the UI thread because
-    // shouldInterceptRequest runs on a background thread where calling any WebView method
-    // (including getUrl()) throws and crashes the process.
     private volatile String currentPageUrl;
-    // Scripts we have already served in this session. EAMS pages bundle multiple libraries into
-    // one URL (jquery-form,jquery-history,jquery-colorbox,jquery-chosen.js), and every sub-page
-    // references it again. History.js throws "Adapter has already been loaded" on the second
-    // fetch and breaks all AJAX navigation. Cache script bodies in memory and return 304 for
-    // subsequent requests so the browser reuses its cached copy without re-executing the script.
-    private final java.util.Map<String, byte[]> servedScripts =
-            new java.util.concurrent.ConcurrentHashMap<>();
     private AppSettings settings;
     private WebView webView;
     private FrameLayout webContainer;
@@ -100,6 +84,7 @@ public final class ImportActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         settings = new AppSettings(this);
+        recordDiagnostic("APP " + appVersion());
         View content = buildContent();
         Ui.applySystemBarInsets(content);
         setContentView(content);
@@ -134,8 +119,7 @@ public final class ImportActivity extends Activity {
         reload.setOnClickListener(v -> {
             if (webView != null) webView.reload();
         });
-        // Long-press the refresh button to inspect why a page rendered incompletely (WebVPN
-        // subresource/AJAX failures and JS console errors are collected here).
+        // Long-press the refresh button to inspect subresource and JavaScript failures.
         reload.setOnLongClickListener(v -> {
             showDiagnostics();
             return true;
@@ -221,13 +205,9 @@ public final class ImportActivity extends Activity {
     private WebView createWebView() {
         WebView view = new WebView(this);
         view.setBackgroundColor(Color.WHITE);
-        // The 1.12.0 redirect loop could poison the HTTP cache with truncated/failed script
-        // responses; cached entries are then served without ever consulting the network or the
-        // interceptor, keeping the portal broken forever. Start each import session clean.
-        view.clearCache(true);
         WebSettings webSettings = view.getSettings();
         webSettings.setJavaScriptEnabled(true);
-        webSettings.setJavaScriptCanOpenWindowsAutomatically(false);
+        webSettings.setJavaScriptCanOpenWindowsAutomatically(true);
         webSettings.setSupportMultipleWindows(false);
         webSettings.setDomStorageEnabled(true);
         webSettings.setDatabaseEnabled(true);
@@ -242,9 +222,11 @@ public final class ImportActivity extends Activity {
         webSettings.setBlockNetworkLoads(false);
         webSettings.setBlockNetworkImage(false);
         webSettings.setTextZoom(100);
-        webSettings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        // Earlier builds rewrote a few legacy resources. Never reuse those persisted responses:
+        // cookies remain available, while scripts and styles are requested from the school again.
+        webSettings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        webSettings.setUserAgentString(AcademicWebPolicy.userAgent(settings.schoolUrl()));
+        view.clearCache(true);
         applyWebRenderProfile(view, settings.schoolUrl());
 
         CookieManager cookieManager = CookieManager.getInstance();
@@ -269,44 +251,34 @@ public final class ImportActivity extends Activity {
             }
         });
         view.setWebViewClient(new WebViewClient() {
+            @Override public WebResourceResponse shouldInterceptRequest(
+                    WebView view, WebResourceRequest request) {
+                if (request != null && request.isForMainFrame()) {
+                    String requestedWith = headerValue(
+                            request.getRequestHeaders(), "X-Requested-With");
+                    recordDiagnostic("MAIN-REQUEST requested-with="
+                            + (requestedWith.isEmpty() ? "none" : requestedWith)
+                            + " " + shorten(request.getUrl().toString()));
+                }
+                return interceptAcademicShell(request);
+            }
+
             @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 setActiveWebView(view);
-                applyWebRenderProfile(view, url);
                 currentPageUrl = url;
-                String base = AcademicWebPolicy.parseWebVpnBase(url);
-                if (base != null) webVpnBase = base;
+                applyWebRenderProfile(view, url);
                 scanGeneration++;
                 setImporting(false);
                 status.setText("正在载入教务页面…");
                 address.setText(url);
             }
 
-            @Override public WebResourceResponse shouldInterceptRequest(WebView view,
-                                                                        WebResourceRequest request) {
-                // Runs on a WebView background thread: an uncaught exception here kills the whole
-                // process ("crash on load"). The interceptor is best-effort — on any failure fall
-                // back to letting the WebView load the resource normally.
-                try {
-                    return interceptWebVpnResource(request);
-                } catch (Throwable t) {
-                    recordDiagnostic("INTERCEPT-CRASH " + t.getClass().getSimpleName()
-                            + ": " + t.getMessage());
-                    return null;
-                }
-            }
-
             @Override public void onPageFinished(WebView view, String url) {
                 CookieManager.getInstance().flush();
-                // The responsive EAMS portal collapses its sidebar at phone width, hiding every
-                // menu item. Forcing a desktop-width layout viewport reflows it back to the full
-                // sidebar layout. Login/CAS pages keep their native narrow layout.
-                if (AcademicWebPolicy.forceDesktopViewport(url)) {
-                    view.evaluateJavascript(AcademicWebPolicy.FORCE_DESKTOP_VIEWPORT_JS, null);
-                }
-                ensureJQueryPresent(view, url);
                 String selected = ImportAdapter.idAt(adapterSpinner.getSelectedItemPosition());
                 String resolved = ImportAdapter.resolve(selected, url);
-                status.setText(String.format(Locale.CHINA, "已就绪 · %s", ImportAdapter.labelOf(resolved)));
+                status.setText(String.format(Locale.CHINA, "已就绪 · %s",
+                        ImportAdapter.labelOf(resolved)));
                 address.setText(url);
             }
 
@@ -320,9 +292,7 @@ public final class ImportActivity extends Activity {
 
             @Override public void onReceivedError(WebView view, WebResourceRequest request,
                                                    WebResourceError error) {
-                // Record every failed request, not just the main frame: on WebVPN the main page
-                // loads fine but its stylesheets/scripts/AJAX often fail, and those are exactly
-                // the failures that leave the bare-skeleton render seen on the portal.
+                // Record every failed request, including scripts and frames used by timetable UIs.
                 recordDiagnostic("LOAD " + error.getErrorCode() + " " + error.getDescription()
                         + (request.isForMainFrame() ? " [main] " : " [sub] ")
                         + shorten(request.getUrl().toString()));
@@ -493,13 +463,6 @@ public final class ImportActivity extends Activity {
         settings.setSchoolUrl(url);
         settings.setSelectedAdapterId(ImportAdapter.idAt(adapterSpinner.getSelectedItemPosition()));
         address.setText(url);
-        // Clear script cache on navigation: each page gets a fresh copy of bundled libraries.
-        // History.js throws on re-execution within a single page session, but separate navigations
-        // should start clean (the WebView itself discards JS state across navigations).
-        servedScripts.clear();
-        // Mirror before loading: shouldInterceptRequest can fire for the main resource before
-        // onPageStarted updates the mirror, and it must never call webView.getUrl() itself.
-        currentPageUrl = url;
         applyWebRenderProfile(webView, url);
         webView.loadUrl(url);
     }
@@ -512,8 +475,7 @@ public final class ImportActivity extends Activity {
             applyWebRenderProfile(view, url);
             return false;
         }
-        // Legacy EAMS menus commonly use javascript: links; about/data/blob are also used by
-        // authenticated pages for in-page navigation and generated timetable documents.
+        // Academic systems commonly use these schemes for in-page navigation and generated views.
         if ("javascript".equalsIgnoreCase(scheme) || "about".equalsIgnoreCase(scheme)
                 || "data".equalsIgnoreCase(scheme) || "blob".equalsIgnoreCase(scheme)) {
             return false;
@@ -538,396 +500,9 @@ public final class ImportActivity extends Activity {
         return true;
     }
 
-    /**
-     * The WebVPN proxy fails to rewrite some absolute internal links (jQuery, CSS, avatar/AJAX
-     * endpoints), so the WebView requests them straight from http://jwxt.neuq.edu.cn/... without
-     * the WebVPN session and they fail — leaving the bare skeleton. When we detect such a request
-     * while on a WebVPN page, we re-fetch it through the proxy base (which carries the session
-     * cookie) and hand the bytes back to the WebView. Returns null to let normal loading proceed.
-     */
-    private WebResourceResponse interceptWebVpnResource(WebResourceRequest request) {
-        if (request == null) return null;
-        // Only rewrite plain GETs; POSTs and others must reach the proxy through the page itself.
-        String method = request.getMethod();
-        if (method != null && !method.equalsIgnoreCase("GET")) return null;
-        String base = webVpnBase;
-        String original = request.getUrl() == null ? null : request.getUrl().toString();
-        // The virtual path referenced by our main-document HTML injection.
-        if (original != null && original.contains(LOCAL_JQUERY_PATH)) {
-            try {
-                recordDiagnostic("LOCAL-JQUERY-VIRTUAL " + shorten(original));
-                return new WebResourceResponse("text/javascript", "UTF-8",
-                        getAssets().open("jquery-1.7.2.min.js"));
-            } catch (Exception ignored) {
-                recordDiagnostic("LOCAL-JQUERY-FAIL " + ignored.getClass().getSimpleName());
-                return null;
-            }
-        }
-        // EAMS main documents: fetch ourselves so jQuery can be injected into the HTML before
-        // the WebView parses it (post-load injection is too late — inline scripts already ran).
-        // Never intercept CAS ticket-bearing URLs: the ticket is single-use, and consuming it
-        // in our fetch while the WebView retries the same URL would break the login handshake.
-        if (request.isForMainFrame() && original != null && isAcademicHost(original)
-                && !AcademicWebPolicy.useMobileAuthenticationLayout(original)
-                && !original.contains("ticket=")) {
-            return interceptMainDocument(original);
-        }
-        // Trace every script request: earlier diagnostics showed page JS failing with
-        // "jQuery is not defined" while no jQuery request ever appeared in the log, which
-        // makes it impossible to tell whether the request was never sent (memory-cached bad
-        // response) or sent but mis-handled. This line settles that question.
-        if (original != null && original.toLowerCase(Locale.ROOT).contains(".js")
-                && isAcademicHost(original)) {
-            recordDiagnostic("JS-REQ " + shorten(original));
-        }
-        // Some legacy EAMS pages reference jQuery with an absolute HTTP URL. On Android this
-        // request can be rejected before WebView reports a useful network error, so the page's
-        // inline bootstrap runs with `jQuery` undefined. jQuery 1.7.2 is MIT-licensed and keeps
-        // the APIs used by these older portals; serve it locally for jQuery script requests.
-        // Provide the local fallback for:
-        // 1. WebVPN pages (where the proxy may have failed to rewrite the script link)
-        // 2. Same-origin jQuery requests (old EAMS deployments serving jQuery from direct URLs)
-        // 3. Any jQuery request: if the page is from any EAMS/NEUQ domain, jQuery is essential
-        if (isJQueryResource(original) && (webVpnBase != null || isSamePageHost(original) || isAcademicHost(original))) {
-            try {
-                recordDiagnostic("LOCAL-JQUERY " + shorten(original));
-                // Use text/javascript for better compatibility with older pages
-                return new WebResourceResponse("text/javascript", "UTF-8",
-                        getAssets().open("jquery-1.7.2.min.js"));
-            } catch (Exception ignored) {
-                recordDiagnostic("LOCAL-JQUERY-FAIL " + ignored.getClass().getSimpleName());
-            }
-        }
-        String proxied = AcademicWebPolicy.rewriteThroughWebVpn(base, original);
-        // Legacy EAMS servers gate their static scripts/CSS and endpoints like avatar/my.action
-        // on the session cookie and Referer header. WebView sometimes drops or mangles these on
-        // plain-HTTP subresource requests (diagnostics showed HTTP 403 on avatar and scripts
-        // silently failing, leaving "jQuery is not defined"/"bg is not defined" and a bare
-        // skeleton). Refetch every academic-host subresource through URLConnection with the
-        // WebView cookie, Referer and a stable UA. Main-frame documents are left to the WebView
-        // so navigation, redirects and history keep working.
-        if (proxied == null && original != null && !request.isForMainFrame()
-                && isAcademicHost(original)) {
-            proxied = original;
-        }
-        if (proxied == null) return null;
-        // NOTE: this method runs on a WebView background thread. Touching any WebView method
-        // here (view.getUrl() etc.) throws "All WebView methods must be called on the same
-        // thread" and kills the process, so only the mirrored currentPageUrl may be used.
-        String pageUrl = currentPageUrl;
-        try {
-            java.net.HttpURLConnection conn =
-                    (java.net.HttpURLConnection) new java.net.URL(proxied).openConnection();
-            conn.setInstanceFollowRedirects(true);
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(20000);
-            conn.setRequestProperty("User-Agent", AcademicWebPolicy.userAgent(
-                    pageUrl == null ? proxied : pageUrl));
-            conn.setRequestProperty("Accept-Encoding", "identity");
-            if (pageUrl != null) {
-                conn.setRequestProperty("Referer", pageUrl);
-            }
-            String cookie = CookieManager.getInstance().getCookie(proxied);
-            if (cookie != null) conn.setRequestProperty("Cookie", cookie);
-            java.util.Map<String, String> headers = request.getRequestHeaders();
-            if (headers != null) {
-                String accept = headers.get("Accept");
-                if (accept != null) conn.setRequestProperty("Accept", accept);
-                String referer = headers.get("Referer");
-                if (referer != null) conn.setRequestProperty("Referer", referer);
-            }
-            conn.connect();
-            int code = conn.getResponseCode();
-            // EAMS refreshes its session via Set-Cookie on subresource responses; feed them back
-            // to the WebView's cookie store or the session silently dies. CookieManager is
-            // thread-safe, so this is fine on the interceptor thread.
-            java.util.List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
-            if (setCookies != null) {
-                for (String value : setCookies) {
-                    if (value != null) CookieManager.getInstance().setCookie(proxied, value);
-                }
-            }
-            if (code < 200 || code >= 300) {
-                recordDiagnostic("REWRITE-SKIP " + code + " " + shorten(proxied));
-                conn.disconnect();
-                return null;
-            }
-            java.io.InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
-            if (stream == null) stream = new java.io.ByteArrayInputStream(new byte[0]);
-            String contentType = conn.getContentType();
-            String mime = contentType;
-            // Legacy EAMS serves GBK-encoded text without always declaring it. Only pass a
-            // charset through when the server explicitly sent one; otherwise let the WebView
-            // sniff the encoding itself (a wrong forced utf-8 corrupts GBK scripts and pages).
-            String charset = null;
-            if (contentType != null) {
-                int semi = contentType.indexOf(';');
-                if (semi >= 0) {
-                    mime = contentType.substring(0, semi).trim();
-                    int cs = contentType.toLowerCase(Locale.ROOT).indexOf("charset=");
-                    if (cs >= 0) charset = contentType.substring(cs + 8).trim();
-                }
-            }
-            if (mime == null || mime.isEmpty()) mime = guessMime(proxied);
-            // Cache script bodies and return 304 for subsequent requests. EAMS bundles libraries
-            // (jquery-form,jquery-history,...) into one URL, and every subpage re-references it.
-            // History.js throws "Adapter has already been loaded" on the second fetch, breaking
-            // all AJAX navigation. The browser's cache should handle this, but WebView sometimes
-            // bypasses it when the interceptor is active, so we cache ourselves and return 304.
-            // Key by normalized URL: strip cache-busting params like `?_=<timestamp>` so distinct
-            // requests for the same logical script hit the cache.
-            boolean isScript = mime != null && mime.contains("javascript");
-            if (isScript) {
-                String cacheKey = normalizeScriptUrl(proxied);
-                byte[] cached = servedScripts.get(cacheKey);
-                if (cached != null) {
-                    recordDiagnostic("SCRIPT-CACHED-304 " + shorten(proxied));
-                    WebResourceResponse resp = new WebResourceResponse(mime, charset,
-                            new java.io.ByteArrayInputStream(new byte[0]));
-                    try {
-                        resp.setStatusCodeAndReasonPhrase(304, "Not Modified");
-                    } catch (Exception ignored) {}
-                    conn.disconnect();
-                    return resp;
-                }
-                // First time: read, cache, and serve.
-                byte[] body = readAll(stream);
-                servedScripts.put(cacheKey, body);
-                stream = new java.io.ByteArrayInputStream(body);
-            }
-            recordDiagnostic("REWRITE " + code + " " + mime + " " + shorten(proxied));
-            WebResourceResponse response = new WebResourceResponse(mime, charset, stream);
-            try {
-                response.setStatusCodeAndReasonPhrase(code == 0 ? 200 : code,
-                        reason(conn.getResponseMessage(), code));
-                java.util.Map<String, String> out = new java.util.HashMap<>();
-                out.put("Access-Control-Allow-Origin", "*");
-                response.setResponseHeaders(out);
-            } catch (Exception ignored) {
-                // Older WebView may reject some status codes; the stream is still usable.
-            }
-            return response;
-        } catch (Exception e) {
-            recordDiagnostic("REWRITE-FAIL " + e.getClass().getSimpleName() + " " + shorten(proxied));
-            return null;
-        }
-    }
-
-    private static boolean isJQueryResource(String url) {
-        if (url == null) return false;
-        String lower = url.toLowerCase(Locale.ROOT);
-        int query = lower.indexOf('?');
-        if (query >= 0) lower = lower.substring(0, query);
-        int slash = lower.lastIndexOf('/');
-        String file = slash >= 0 ? lower.substring(slash + 1) : lower;
-        // CAS/EAMS propagate the session by URL rewriting, appending a ';JSESSIONID_AUTH=...'
-        // or ';jsessionid=...' path parameter to every script src. Strip it, or the filename
-        // never matches and the local jQuery fallback silently stops applying.
-        int semi = file.indexOf(';');
-        if (semi >= 0) file = file.substring(0, semi);
-        // Do not replace jquery-ui, jquery.form, validation plugins, etc. with the core library.
-        // Only the common core names (jquery.js, jquery.min.js, jquery-1.4.2.min.js, ...) match.
-        return file.matches("jquery(?:[-_.][0-9]+(?:\\.[0-9]+)*)?(?:\\.min)?\\.js");
-    }
-
-    /**
-     * Normalize a script URL for deduplication: strip cache-busting query params like `?_=timestamp`
-     * and `&_=...`. EAMS appends `&_=<millis>` to every script request to defeat HTTP caching, but
-     * that breaks our dedup cache (every request has a unique URL). Keep semantic params like
-     * `?bg=3.4.3` that actually change the server's response.
-     */
-    private static String normalizeScriptUrl(String url) {
-        if (url == null) return null;
-        // Remove `?_=...` or `&_=...` (cache buster) but keep other query params.
-        return url.replaceAll("[?&]_=[^&]*", "");
-    }
-
-    private boolean isSamePageHost(String resourceUrl) {
-        // Runs on the WebView background thread — must not touch webView, only the mirror.
-        String pageUrl = currentPageUrl;
-        if (pageUrl == null || resourceUrl == null) return false;
-        String pageHost = Uri.parse(pageUrl).getHost();
-        String resourceHost = Uri.parse(resourceUrl).getHost();
-        return pageHost != null && resourceHost != null && pageHost.equalsIgnoreCase(resourceHost);
-    }
-
-    /** True when the resource lives on a NEUQ academic host (direct EAMS, CAS, or WebVPN). */
-    private static boolean isAcademicHost(String resourceUrl) {
-        if (resourceUrl == null) return false;
-        String host = Uri.parse(resourceUrl).getHost();
-        if (host == null) return false;
-        host = host.toLowerCase(Locale.ROOT);
-        return host.equals("neuq.edu.cn") || host.endsWith(".neuq.edu.cn");
-    }
-
-    /**
-     * Legacy EAMS pages break irrecoverably when jQuery is missing: every inline
-     * `jQuery(...)` bootstrap throws and the page renders as a bare skeleton. The primary fix
-     * is main-frame injection in the interceptor (a local jQuery script tag inserted into the
-     * HTML before any inline script runs). This post-load check is the watchdog: it reloads
-     * once so the injected HTML path takes effect, and otherwise reports clearly.
-     */
-    // URLs that already got one automatic reload after loading without jQuery. Bounded to a
-    // single reload per URL so a still-broken page reports instead of looping.
-    private final java.util.Set<String> jQueryReloadedUrls = new java.util.HashSet<>();
-
-    private void ensureJQueryPresent(WebView view, String url) {
-        if (view == null || url == null || !isAcademicHost(url)) return;
-        // Login/CAS pages manage their own scripts; only the EAMS portal needs this.
-        if (AcademicWebPolicy.useMobileAuthenticationLayout(url)) return;
-
-        view.evaluateJavascript(
-                "typeof jQuery !== 'undefined'",
-                value -> {
-                    if ("true".equals(value)) {
-                        jQueryReloadedUrls.remove(url);
-                        return;
-                    }
-                    if (jQueryReloadedUrls.add(url)) {
-                        // First failure: reload so the main-frame injection path can kick in.
-                        recordDiagnostic("JQUERY-MISSING-RELOAD " + shorten(url));
-                        status.setText("页面脚本缺失，正在重新加载…");
-                        view.reload();
-                        return;
-                    }
-                    // Reload didn't help either — record it; the diagnostics (JS-REQ/HTML-INJECT
-                    // markers) now show exactly what happened for follow-up.
-                    recordDiagnostic("JQUERY-STILL-MISSING " + shorten(url));
-                    status.setText("页面脚本仍未就绪，请点「诊断」查看详情");
-                });
-    }
-
-    /**
-     * Fetches an EAMS main document ourselves and, when its HTML does not reference jQuery at
-     * all, inserts a script tag pointing at {@link #LOCAL_JQUERY_PATH} right after &lt;head&gt;.
-     * Post-load injection cannot fix these pages — their inline scripts have already thrown by
-     * then — so the tag must be in the HTML before the WebView parses it. The insert is pure
-     * ASCII, which is valid in both GBK and UTF-8 documents, so the page charset is untouched.
-     */
-    private WebResourceResponse interceptMainDocument(String url) {
-        try {
-            java.net.HttpURLConnection conn =
-                    (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-            // CAS redirect hops must stay in the WebView (cookies, history, ticket handling).
-            conn.setInstanceFollowRedirects(false);
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(20000);
-            conn.setRequestProperty("User-Agent", AcademicWebPolicy.userAgent(url));
-            conn.setRequestProperty("Accept",
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-            conn.setRequestProperty("Accept-Encoding", "identity");
-            String cookie = CookieManager.getInstance().getCookie(url);
-            if (cookie != null) conn.setRequestProperty("Cookie", cookie);
-            conn.connect();
-            int code = conn.getResponseCode();
-            java.util.List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
-            if (setCookies != null) {
-                for (String value : setCookies) {
-                    if (value != null) CookieManager.getInstance().setCookie(url, value);
-                }
-            }
-            String contentType = conn.getContentType();
-            if (code != 200 || contentType == null
-                    || !contentType.toLowerCase(Locale.ROOT).contains("text/html")) {
-                // Redirect/error/non-HTML: let the WebView do the navigation itself.
-                recordDiagnostic("MAIN-PASS " + code + " " + shorten(url));
-                conn.disconnect();
-                return null;
-            }
-            byte[] body = readAll(conn.getInputStream());
-            conn.disconnect();
-            if (indexOfAscii(body, "jquery") >= 0) {
-                // Page references jQuery itself; the subresource fallback covers failures.
-                recordDiagnostic("MAIN-HAS-JQUERY " + shorten(url));
-            } else {
-                int head = indexOfAscii(body, "<head");
-                int insert = -1;
-                if (head >= 0) {
-                    for (int i = head; i < body.length; i++) {
-                        if (body[i] == '>') { insert = i + 1; break; }
-                    }
-                }
-                if (insert < 0) insert = indexOfAscii(body, "<script");
-                if (insert >= 0) {
-                    byte[] tag = ("<script src=\"" + LOCAL_JQUERY_PATH + "\"></script>")
-                            .getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-                    byte[] merged = new byte[body.length + tag.length];
-                    System.arraycopy(body, 0, merged, 0, insert);
-                    System.arraycopy(tag, 0, merged, insert, tag.length);
-                    System.arraycopy(body, insert, merged, insert + tag.length, body.length - insert);
-                    body = merged;
-                    recordDiagnostic("HTML-INJECT-JQUERY " + shorten(url));
-                } else {
-                    recordDiagnostic("HTML-INJECT-SKIP no-head " + shorten(url));
-                }
-            }
-            String mime = "text/html";
-            String charset = null;
-            int cs = contentType.toLowerCase(Locale.ROOT).indexOf("charset=");
-            if (cs >= 0) charset = contentType.substring(cs + 8).trim();
-            WebResourceResponse response = new WebResourceResponse(mime, charset,
-                    new java.io.ByteArrayInputStream(body));
-            try {
-                response.setStatusCodeAndReasonPhrase(200, "OK");
-            } catch (Exception ignored) {
-            }
-            return response;
-        } catch (Exception e) {
-            recordDiagnostic("MAIN-FETCH-FAIL " + e.getClass().getSimpleName() + " " + shorten(url));
-            return null;
-        }
-    }
-
-    private static byte[] readAll(java.io.InputStream in) throws java.io.IOException {
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-        byte[] buf = new byte[8192];
-        int read;
-        while ((read = in.read(buf)) > 0) out.write(buf, 0, read);
-        return out.toByteArray();
-    }
-
-    /** Case-insensitive ASCII substring search over raw bytes (works for GBK and UTF-8 HTML). */
-    private static int indexOfAscii(byte[] body, String needle) {
-        byte[] target = needle.toLowerCase(Locale.ROOT)
-                .getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-        outer:
-        for (int i = 0; i + target.length <= body.length; i++) {
-            for (int j = 0; j < target.length; j++) {
-                byte b = body[i + j];
-                if (b >= 'A' && b <= 'Z') b += 32;
-                if (b != target[j]) continue outer;
-            }
-            return i;
-        }
-        return -1;
-    }
-
-    private static String reason(String message, int code) {
-        if (message != null && !message.isEmpty()) return message;
-        return code >= 400 ? "Error" : "OK";
-    }
-
-    private static String guessMime(String url) {
-        String u = url.toLowerCase(Locale.ROOT);
-        int q = u.indexOf('?');
-        if (q >= 0) u = u.substring(0, q);
-        if (u.endsWith(".js")) return "application/javascript";
-        if (u.endsWith(".css")) return "text/css";
-        if (u.endsWith(".json")) return "application/json";
-        if (u.endsWith(".png")) return "image/png";
-        if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return "image/jpeg";
-        if (u.endsWith(".gif")) return "image/gif";
-        if (u.endsWith(".svg")) return "image/svg+xml";
-        if (u.endsWith(".woff2")) return "font/woff2";
-        if (u.endsWith(".woff")) return "font/woff";
-        if (u.endsWith(".ttf")) return "font/ttf";
-        return "text/html";
-    }
-
     private void recordDiagnostic(String line) {
         if (line == null || line.isEmpty()) return;
-        // Called from both the UI thread and the WebView background thread that runs
-        // shouldInterceptRequest, so all access to the list is synchronized.
+        // Console and network callbacks may arrive close together; keep report updates atomic.
         synchronized (diagnostics) {
             // favicon.ico failures are harmless and, during a reload loop, arrive several times a
             // second — they would flush every useful entry out of the capped list. Keep one marker.
@@ -939,6 +514,120 @@ public final class ImportActivity extends Activity {
             String stamped = String.format(Locale.CHINA, "%tT %s", new java.util.Date(), line);
             diagnostics.add(stamped);
             while (diagnostics.size() > MAX_DIAGNOSTICS) diagnostics.remove(0);
+        }
+    }
+
+    /**
+     * Loads ordinary EAMS main documents with browser headers and repairs only HTML that uses the
+     * Beangle globals without declaring the official foundation bundle. CAS ticket requests stay
+     * in WebView because those tickets are single-use.
+     */
+    private WebResourceResponse interceptAcademicShell(WebResourceRequest request) {
+        if (request == null || request.getUrl() == null) return null;
+        String url = request.getUrl().toString();
+        if (!AcademicShellRepair.shouldInspect(
+                url, request.getMethod(), request.isForMainFrame())) return null;
+        java.net.HttpURLConnection connection = null;
+        try {
+            connection = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(25000);
+            connection.setRequestProperty("User-Agent", AcademicWebPolicy.userAgent(url));
+            connection.setRequestProperty("Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            connection.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("Cache-Control", "no-cache");
+
+            String referer = headerValue(request.getRequestHeaders(), "Referer");
+            if (referer.isEmpty()) referer = currentPageUrl;
+            if (referer != null && !referer.isEmpty() && !referer.equals(url)) {
+                connection.setRequestProperty("Referer", referer);
+            }
+            String cookie = CookieManager.getInstance().getCookie(url);
+            if (cookie != null && !cookie.isEmpty()) {
+                connection.setRequestProperty("Cookie", cookie);
+            }
+
+            connection.connect();
+            int code = connection.getResponseCode();
+            copyResponseCookies(url, connection.getHeaderFields());
+            String contentType = connection.getContentType();
+            if (code != 200 || contentType == null
+                    || !contentType.toLowerCase(Locale.ROOT).contains("text/html")) {
+                recordDiagnostic("SHELL-PASS " + code + " " + shorten(url));
+                return null;
+            }
+
+            byte[] source = readAllBytes(connection.getInputStream());
+            AcademicShellRepair.Result repaired = AcademicShellRepair.repair(url, source);
+            recordDiagnostic((repaired.changed ? "SHELL-REPAIR eams " : "SHELL-COMPLETE eams ")
+                    + shorten(url));
+
+            String charset = charsetOf(contentType);
+            WebResourceResponse response = new WebResourceResponse(
+                    "text/html", charset, new java.io.ByteArrayInputStream(repaired.body));
+            response.setStatusCodeAndReasonPhrase(200, "OK");
+            java.util.Map<String, String> safeHeaders = new java.util.HashMap<>();
+            copyResponseHeader(connection, safeHeaders, "Cache-Control");
+            copyResponseHeader(connection, safeHeaders, "Content-Security-Policy");
+            copyResponseHeader(connection, safeHeaders, "Referrer-Policy");
+            copyResponseHeader(connection, safeHeaders, "Permissions-Policy");
+            copyResponseHeader(connection, safeHeaders, "X-Content-Type-Options");
+            response.setResponseHeaders(safeHeaders);
+            return response;
+        } catch (Exception exception) {
+            recordDiagnostic("SHELL-FAIL " + exception.getClass().getSimpleName()
+                    + " " + shorten(url));
+            return null;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static void copyResponseCookies(String url,
+                                             Map<String, List<String>> headers) {
+        if (headers == null) return;
+        for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
+            if (entry.getKey() == null || !"Set-Cookie".equalsIgnoreCase(entry.getKey())
+                    || entry.getValue() == null) continue;
+            for (String value : entry.getValue()) {
+                if (value != null) CookieManager.getInstance().setCookie(url, value);
+            }
+        }
+    }
+
+    private static void copyResponseHeader(java.net.HttpURLConnection connection,
+                                           Map<String, String> output, String name) {
+        String value = connection.getHeaderField(name);
+        if (value != null && !value.isEmpty()) output.put(name, value);
+    }
+
+    private static String charsetOf(String contentType) {
+        if (contentType == null) return null;
+        String lower = contentType.toLowerCase(Locale.ROOT);
+        int index = lower.indexOf("charset=");
+        if (index < 0) return null;
+        String charset = contentType.substring(index + 8).trim();
+        int semi = charset.indexOf(';');
+        if (semi >= 0) charset = charset.substring(0, semi).trim();
+        if (charset.length() >= 2 && ((charset.startsWith("\"") && charset.endsWith("\""))
+                || (charset.startsWith("'") && charset.endsWith("'")))) {
+            charset = charset.substring(1, charset.length() - 1);
+        }
+        return charset.isEmpty() ? null : charset;
+    }
+
+    private static byte[] readAllBytes(java.io.InputStream input) throws java.io.IOException {
+        try (java.io.InputStream in = input;
+             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = in.read(buffer)) >= 0) {
+                if (count > 0) out.write(buffer, 0, count);
+            }
+            return out.toByteArray();
         }
     }
 
@@ -993,17 +682,24 @@ public final class ImportActivity extends Activity {
     private void applyWebRenderProfile(WebView view, String url) {
         if (view == null) return;
         WebSettings webSettings = view.getSettings();
-        // CAS advertises a responsive mobile page while EAMS advertises a legacy desktop page.
-        // Keep the UA in sync with the destination so the portal returns the matching markup.
-        // This is applied before loadUrl and on redirects; WebView only reloads when the value
-        // actually changes, so an auth -> EAMS redirect settles after one transition.
-        String desiredUserAgent = AcademicWebPolicy.userAgent(url);
-        if (!desiredUserAgent.equals(webSettings.getUserAgentString())) {
-            webSettings.setUserAgentString(desiredUserAgent);
-        }
+        // Keep a stable browser identity across CAS redirects; only viewport fitting changes.
         webSettings.setUseWideViewPort(true);
         webSettings.setLoadWithOverviewMode(AcademicWebPolicy.loadWithOverview(url));
         webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        String requestedUserAgent = AcademicWebPolicy.userAgent(url);
+        if (!requestedUserAgent.equals(webSettings.getUserAgentString())) {
+            webSettings.setUserAgentString(requestedUserAgent);
+        }
+    }
+
+    private static String headerValue(Map<String, String> headers, String wanted) {
+        if (headers == null || wanted == null) return "";
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            if (wanted.equalsIgnoreCase(entry.getKey())) {
+                return entry.getValue() == null ? "" : entry.getValue();
+            }
+        }
+        return "";
     }
 
     private String webErrorMessage(int errorCode, CharSequence description) {
@@ -1042,6 +738,16 @@ public final class ImportActivity extends Activity {
         PackageInfo info = WebView.getCurrentWebViewPackage();
         if (info == null) return "系统 WebView 不可用";
         return info.packageName + " " + info.versionName;
+    }
+
+    @SuppressWarnings("deprecation")
+    private String appVersion() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName + " (" + info.versionCode + ")";
+        } catch (Exception ignored) {
+            return "unknown";
+        }
     }
 
     private void recoverWebView(WebView failedView, boolean crashed) {
@@ -1085,9 +791,10 @@ public final class ImportActivity extends Activity {
         String selected = ImportAdapter.idAt(adapterSpinner.getSelectedItemPosition());
         String adapter = ImportAdapter.resolve(selected, url);
         int generation = ++scanGeneration;
+        recordDiagnostic("IMPORT-START " + ImportAdapter.labelOf(adapter) + " " + shorten(url));
         setImporting(true);
         status.setText(String.format(Locale.CHINA, "正在通过%s拉取…", ImportAdapter.labelOf(adapter)));
-        webView.evaluateJavascript(ImportScript.forAdapter(adapter), ignored ->
+        webView.evaluateJavascript(ImportScript.forAdapter(adapter, url), ignored ->
                 handler.postDelayed(() -> pollImport(generation, adapter, 0), 200));
     }
 
@@ -1095,6 +802,7 @@ public final class ImportActivity extends Activity {
         if (generation != scanGeneration || webView == null) return;
         if (attempt >= MAX_POLL_ATTEMPTS) {
             setImporting(false);
+            recordDiagnostic("IMPORT-TIMEOUT " + ImportAdapter.labelOf(adapter));
             showImportError("拉取超时，请检查网络和登录状态后重试");
             return;
         }
@@ -1105,7 +813,9 @@ public final class ImportActivity extends Activity {
             } else if ("error".equals(state)) {
                 webView.evaluateJavascript("window.__qianxiImportError || ''", error -> {
                     setImporting(false);
-                    showImportError(decodeJavascriptString(error));
+                    String detail = decodeJavascriptString(error);
+                    recordDiagnostic("IMPORT-SCRIPT-ERROR " + shorten(detail));
+                    showImportError(detail);
                 });
             } else {
                 handler.postDelayed(() -> pollImport(generation, adapter, attempt + 1), 250);
@@ -1117,15 +827,29 @@ public final class ImportActivity extends Activity {
         if (generation != scanGeneration) return;
         webView.evaluateJavascript("JSON.stringify(window.__qianxiImportPayload || null)", value -> {
             if (generation != scanGeneration) return;
-            setImporting(false);
             try {
-                ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(value, adapter);
+                ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(
+                        value, adapter, settings.classTimes());
+                recordDiagnostic(String.format(Locale.CHINA,
+                        "IMPORT-RESULT adapter=%s layout=%s source=%s tables=%d frames=%d shadow=%d candidates=%d missingWeeks=%d runtime=%d records=%d courses=%d skipped=%d",
+                        outcome.adapterId, outcome.layout, outcome.source, outcome.tables, outcome.frames,
+                        outcome.shadowRoots, outcome.candidates, outcome.missingWeekCandidates,
+                        outcome.runtimeActivities,
+                        outcome.recordRows,
+                        outcome.courses.size(),
+                        outcome.skippedItems));
                 if (outcome.courses.isEmpty()) {
+                    setImporting(false);
                     showImportError(emptyImportMessage(outcome));
                     return;
                 }
+                setImporting(false);
+                recordDiagnostic("IMPORT-PREVIEW courses=" + outcome.courses.size());
                 showImportPreview(outcome);
             } catch (Exception exception) {
+                setImporting(false);
+                recordDiagnostic("IMPORT-PARSE-ERROR " + exception.getClass().getSimpleName()
+                        + ": " + shorten(exception.getMessage()));
                 showImportError("页面数据解析失败：" + exception.getMessage());
             }
         });
@@ -1135,12 +859,38 @@ public final class ImportActivity extends Activity {
         StringBuilder message = new StringBuilder();
         message.append("当前页面没有识别到有效课程。请确认已进入当前学期的个人周课表页面。");
         message.append("\n\n识别器：").append(ImportAdapter.labelOf(outcome.adapterId));
+        if (!outcome.layout.isEmpty()) message.append("\n页面结构：").append(outcome.layout);
         if (!outcome.pageTitle.isEmpty()) message.append("\n页面：").append(outcome.pageTitle);
         String host = Uri.parse(outcome.sourceUrl).getHost();
         if (host != null && !host.isEmpty()) message.append("\n站点：").append(host);
+        String path = Uri.parse(outcome.sourceUrl).getPath();
+        if ("qiangzhi".equals(outcome.layout) && path != null
+                && path.toLowerCase(Locale.ROOT).contains("/framework/xsmain")) {
+            message.append("\n\n当前仍是强智教务框架首页（xsMainV.htmlx），这里没有课程数据。请在页面菜单中打开“个人课表/我的课表”，看到周一至周日课程格后，再点击“拉取课表”。");
+        }
         message.append(String.format(Locale.CHINA,
-                "\n诊断：%d 个表格 · %d 个内嵌页面 · %d 条候选 · %d 条无效",
-                outcome.tables, outcome.frames, outcome.candidates, outcome.skippedItems));
+                "\n诊断：%d 个表格 · %d 个内嵌页面 · %d 个组件根 · %d 个运行时活动 · %d 个列表行 · %d 条候选 · %d 条缺周次 · %d 条无效",
+                outcome.tables, outcome.frames, outcome.shadowRoots,
+                outcome.runtimeActivities, outcome.recordRows, outcome.candidates,
+                outcome.missingWeekCandidates, outcome.skippedItems));
+        if (outcome.visualDays > 0 || outcome.visualSections > 0 || outcome.visualNodes > 0) {
+            message.append(String.format(Locale.CHINA,
+                    "\n可视定位：%d 个星期 · %d 个节次 · %d 个卡片节点 · %d 条有效",
+                    outcome.visualDays, outcome.visualSections, outcome.visualNodes,
+                    outcome.visualCandidates));
+        }
+        if (!outcome.candidateSamples.isEmpty()) {
+            message.append("\n\n候选内容：");
+            for (String sample : outcome.candidateSamples) {
+                message.append("\n· ").append(sample);
+            }
+        }
+        if (!outcome.fingerprints.isEmpty()) {
+            message.append("\n\n页面指纹：");
+            for (String fingerprint : outcome.fingerprints) {
+                message.append("\n· ").append(fingerprint);
+            }
+        }
         if (outcome.tables == 0 && outcome.candidates == 0) {
             message.append("\n\n该页面可能使用了尚未适配的画布或接口数据，请尝试切换到网页版课表。");
         }
@@ -1184,6 +934,11 @@ public final class ImportActivity extends Activity {
         }
         if (outcome.skippedItems > 0) {
             preview.append("已忽略 ").append(outcome.skippedItems).append(" 条无效记录");
+        }
+        if (outcome.missingWeekCandidates > 0) {
+            if (preview.length() > 0 && preview.charAt(preview.length() - 1) != '\n') preview.append('\n');
+            preview.append("已忽略 ").append(outcome.missingWeekCandidates)
+                    .append(" 条无法确认周次的候选，未擅自设为 1-20 周");
         }
         int conflicts = countExistingConflicts(outcome.courses);
         if (conflicts > 0) {
