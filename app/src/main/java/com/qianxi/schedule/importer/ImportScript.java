@@ -117,7 +117,31 @@ public final class ImportScript {
               if (!match) return '';
               return clean(match[1]) + '周' + (match[2] ? '(' + match[2] + ')' : '');
             }
-            function courseFields(node, text) {
+            function tableProfile(table) {
+              if (!table) return '';
+              const compact = nodeText(table).replace(/\\s+/g, '');
+              const signatures = [
+                /0?8:00[-~至—]0?9:35/,
+                /0?9:50[-~至—]12:15/,
+                /13:30[-~至—]15:05/,
+                /15:20[-~至—]16:55/,
+                /17:05[-~至—]18:40/,
+                /19:20[-~至—]21:45/
+              ];
+              const matches = signatures.filter(pattern => pattern.test(compact)).length;
+              return matches >= 4 ? 'sixteen-week-halves' : '';
+            }
+            function descriptiveWeeks(value, profile) {
+              if (profile !== 'sixteen-week-halves') return '';
+              const compact = clean(value).replace(/\\s+/g, '');
+              if (/前八周/.test(compact)) return '1-8周';
+              if (/后八周/.test(compact)) return '9-16周';
+              if (/(?:全周|整个学期|整学期|全学期)/.test(compact)) return '1-16周';
+              if (/单周/.test(compact)) return '1-16周(单)';
+              if (/双周/.test(compact)) return '1-16周(双)';
+              return '';
+            }
+            function courseFields(node, text, profile) {
               const lines = clean(text).split('\\n').map(clean).filter(Boolean);
               const weekLine = lines.findIndex(line =>
                 /\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?.*周/.test(line));
@@ -141,6 +165,7 @@ public final class ImportScript {
                 '[class*="week-text"]', '[class*="zcd"]']) ||
                 labeledText(text, ['上课周次', '周次', '周数']);
               if (!weeks) weeks = compactEamsWeeks(text);
+              if (!weeks) weeks = descriptiveWeeks(text, profile);
               if (!name && lines.length && !/^(?:第?[一二三四五六七八九十\\d]+节|上午|下午|晚上|早晨)$/.test(lines[0])
                   && !/\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?.*周/.test(lines[0])) {
                 name = lines[0];
@@ -157,7 +182,15 @@ public final class ImportScript {
               if (!location) {
                 location = lines.find(line =>
                   /(楼|馆|教室|校区|中心|实验室|操场|球场|机房)\\s*[-A-Za-z]?\\d*$/i.test(line) ||
+                  (profile === 'sixteen-week-halves' && /[一二三四五六七八九十]教(?:\\d{1,2})?[A-Za-z]?\\d{2,4}$/i.test(line)) ||
                   /^[A-Za-z]\\d{2,4}$/.test(line)) || '';
+              }
+              if (profile === 'sixteen-week-halves' && name) {
+                const parts = clean(name).split(/[;；]/).map(clean).filter(Boolean);
+                if (parts.length > 1 && parts.slice(1).some(part =>
+                    /(?:限选|必选|任选|全周|前八周|后八周|单周|双周|上课地点|教室)/.test(part))) {
+                  name = parts[0];
+                }
               }
               const weekMarker = weeks.search(/[（(]周[）)]/);
               if (weekMarker >= 0) weeks = clean(weeks.slice(0, weekMarker));
@@ -165,7 +198,7 @@ public final class ImportScript {
               if (describedWeeks) weeks = clean(describedWeeks[0]);
               return {name, teacher, location, weeks};
             }
-            function addText(day, section, endSection, text, title, fields, parity) {
+            function addText(day, section, endSection, text, title, fields, parity, profile) {
               day = dayNumber(day); section = sectionNumber(section);
               endSection = sectionNumber(endSection || section) || section;
               text = clean(text);
@@ -188,6 +221,7 @@ public final class ImportScript {
                 if (weekMatch) weeks = clean(weekMatch[0]);
               }
               if (!weeks) weeks = compactEamsWeeks(text);
+              if (!weeks) weeks = descriptiveWeeks(text, profile);
               if (parity && !/[单双]/.test(weeks)) {
                 if (weeks) weeks += '(' + parity + ')';
               }
@@ -205,17 +239,17 @@ public final class ImportScript {
               if (clean(fields.endTime || '')) item.endTime = clean(fields.endTime);
               output.push(item);
             }
-            function add(day, section, endSection, node, parity) {
+            function add(day, section, endSection, node, parity, timing, profile) {
               const text = nodeText(node);
               if (/\\{[^}]*第?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?周[^}]*\\}/.test(text)) {
-                addCourseBlock(day, section, endSection, node, parity);
+                addCourseBlock(day, section, endSection, node, parity, timing, profile);
                 return;
               }
               addText(day, section, endSection, text,
                 node && typeof node.getAttribute === 'function' ? node.getAttribute('title') : '',
-                courseFields(node, text), parity);
+                Object.assign(courseFields(node, text, profile), timing || {}), parity, profile);
             }
-            function addCourseBlock(day, section, endSection, node, parity) {
+            function addCourseBlock(day, section, endSection, node, parity, timing, profile) {
               const text = nodeText(node);
               const tokens = text.split(/\\s+/).filter(Boolean);
               const timeIndexes = [];
@@ -237,9 +271,8 @@ public final class ImportScript {
                   const weeks = (tokens[index].match(/\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周(?:\\s*[（(]?[单双]周?[）)]?)?/) || [])[0] || '';
                   const itemText = [name, teacher, location, weeks, tokens[index]]
                     .filter(Boolean).join('\\n');
-                  addText(day, section, endSection, itemText, '', {
-                    name, teacher, location, weeks
-                  }, parity);
+                  addText(day, section, endSection, itemText, '',
+                    Object.assign({name, teacher, location, weeks}, timing || {}), parity, profile);
                 }
                 return;
               }
@@ -249,16 +282,16 @@ public final class ImportScript {
               if (parts.length <= 1) {
                 addText(day, section, endSection, text,
                   node && typeof node.getAttribute === 'function' ? node.getAttribute('title') : '',
-                  courseFields(node, text), parity);
+                  Object.assign(courseFields(node, text, profile), timing || {}), parity, profile);
                 return;
               }
               for (const part of parts) {
                 const holder = (node.ownerDocument || document).createElement('div');
                 holder.innerHTML = String(part == null ? '' : part);
-                try { add(day, section, endSection, holder, parity); } catch (_) {}
+                try { add(day, section, endSection, holder, parity, timing, profile); } catch (_) {}
               }
             }
-            function addCell(day, section, cell, parity, explicitEndSection) {
+            function addCell(day, section, cell, parity, explicitEndSection, timing, profile) {
               const endSection = Number(explicitEndSection) || Number(section) +
                 Math.max(1, Number(cell.rowSpan || 1)) - 1;
               let blocks = Array.from(cell.querySelectorAll('.kbcontent'))
@@ -274,9 +307,9 @@ public final class ImportScript {
                     child.classList && child.classList.contains('title')));
               }
               if (blocks.length) {
-                blocks.forEach(node => addCourseBlock(day, section, endSection, node, parity));
+                blocks.forEach(node => addCourseBlock(day, section, endSection, node, parity, timing, profile));
               }
-              else add(day, section, endSection, cell, parity);
+              else add(day, section, endSection, cell, parity, timing, profile);
             }
             function chineseNumber(value) {
               const digits = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
@@ -302,9 +335,14 @@ public final class ImportScript {
             }
             function endSectionFrom(value, fallback) {
               const text = clean(value);
-              let match = text.match(/(?:第)?\\s*\\d{1,2}\\s*[-~至—、,，]\\s*(?:第)?\\s*(\\d{1,2})\\s*节?/);
+              let match = text.match(/(?:第)?\\s*\\d{1,2}\\s*[-~至—、,，]\\s*(?:第)?\\s*(\\d{1,2})\\s*节/);
               if (!match) match = text.match(/^\\s*\\d{1,2}\\s*[-~至—、,，]\\s*(\\d{1,2})\\s*$/);
               return match ? Number(match[1]) : fallback;
+            }
+            function clockRange(value) {
+              const match = clean(value).match(/([01]?\\d|2[0-3])[:：](\\d{2})\\s*[-~至—]\\s*([01]?\\d|2[0-3])[:：](\\d{2})/);
+              if (!match) return {};
+              return {startTime: match[1] + ':' + match[2], endTime: match[3] + ':' + match[4]};
             }
             function field(value, names) {
               if (!value || typeof value !== 'object') return '';
@@ -588,6 +626,7 @@ public final class ImportScript {
               return match ? dayNumber(match[1]) : 0;
             }
             function scanTable(table, mode) {
+              const profile = tableProfile(table);
               const rows = Array.from(table.rows || []);
               const grid = [];
               rows.forEach((row, rowIndex) => {
@@ -646,11 +685,13 @@ public final class ImportScript {
                   .filter((entry, column) => entry && entry.originColumn === column);
                 let section = 0;
                 let labeledEndSection = 0;
+                let timing = {};
                 for (const entry of labelEntries) {
                   const label = nodeText(entry.cell);
                   section = sectionFrom(label, section);
                   labeledEndSection = endSectionFrom(label, labeledEndSection);
-                  if (section) break;
+                  const parsedTiming = clockRange(label);
+                  if (parsedTiming.startTime) timing = parsedTiming;
                 }
                 let explicitEndSection = labeledEndSection;
                 if (!section && mode === 'qiangzhi') {
@@ -664,7 +705,7 @@ public final class ImportScript {
                   if (!entry || entry.originRow !== rowIndex || entry.originColumn !== column) continue;
                   const parity = Number(entry.cell.colSpan || 1) === 1
                     ? columnParity[column] || '' : '';
-                  addCell(columnDays[column], section, entry.cell, parity, explicitEndSection);
+                  addCell(columnDays[column], section, entry.cell, parity, explicitEndSection, timing, profile);
                 }
                 if (output.length > before) nextSection = Math.max(nextSection, section + 1);
               });
