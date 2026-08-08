@@ -118,6 +118,18 @@ public final class AppSettings {
     }
 
     /**
+     * Text enhancement mode for better readability over background images.
+     * 0 = none (default), 1 = light overlay, 2 = dark overlay
+     */
+    public int textEnhancementMode() {
+        return Math.max(0, Math.min(2, preferences.getInt("text_enhancement_mode", 0)));
+    }
+
+    public void setTextEnhancementMode(int mode) {
+        preferences.edit().putInt("text_enhancement_mode", Math.max(0, Math.min(2, mode))).apply();
+    }
+
+    /**
      * Per-slot preferred course: when several fully-overlapping courses share a slot, this records
      * which course id the user chose to show on top. Keyed by "day-startNode".
      */

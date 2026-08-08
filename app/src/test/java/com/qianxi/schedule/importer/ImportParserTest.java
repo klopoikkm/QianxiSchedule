@@ -476,4 +476,164 @@ public final class ImportParserTest {
         assertTrue(courses.get(0).occursInWeek(8));
         assertTrue(!courses.get(0).occursInWeek(9));
     }
+
+    @Test
+    public void singleCellCourseWithoutRoomIsNotTreatedAsWeekMetadata() throws Exception {
+        // A one-cell course string whose metadata group ends in 全周 has no room, so the whole
+        // line ends with "周)". That must not be mistaken for a week descriptor row.
+        String payload = "{\"items\":[{\"day\":5,\"section\":4,\"endSection\":5,"
+                + "\"weeks\":\"1-16周\","
+                + "\"text\":\"科技创新与挑战3D(李铁夫；限选；全周)\"}]}";
+
+        List<Course> courses = ImportParser.parseJavascriptResult(
+                JSONObject.quote(payload), ImportAdapter.GENERIC);
+
+        assertEquals(1, courses.size());
+        assertEquals("科技创新与挑战3D", courses.get(0).name);
+        assertEquals(5, courses.get(0).dayOfWeek);
+    }
+
+    @Test
+    public void pureWeekDescriptorLinesAreStillRejectedAsNames() throws Exception {
+        // The counterpart of the case above: a line that really is only week wording must not
+        // become a course name.
+        String payload = "{\"items\":[{\"day\":1,\"section\":1,"
+                + "\"weeks\":\"1-16周\",\"text\":\"1-16周(单)\"}]}";
+
+        ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(
+                JSONObject.quote(payload), ImportAdapter.GENERIC);
+
+        assertTrue(outcome.courses.isEmpty());
+        assertEquals(1, outcome.skippedItems);
+    }
+
+    @Test
+    public void parsesWeekRangesWrittenWithFullWidthTilde() {
+        // 8:00～9:35 style pages use U+FF5E, not ASCII '~'.
+        long mask = ImportParser.extractWeeks("1～8周");
+        assertEquals(1, Long.numberOfTrailingZeros(mask) + 1);
+        assertEquals(8, 64 - Long.numberOfLeadingZeros(mask));
+        assertEquals(8, Long.bitCount(mask));
+    }
+
+    @Test
+    public void parsesSectionRangeWrittenWithFullWidthTilde() throws Exception {
+        String payload = "{\"items\":[{\"day\":3,\"section\":1,"
+                + "\"weeks\":\"1-16周\",\"text\":\"大学物理\\n第3～4节\"}]}";
+
+        List<Course> courses = ImportParser.parseJavascriptResult(
+                JSONObject.quote(payload), ImportAdapter.GENERIC);
+
+        assertEquals(1, courses.size());
+        assertEquals(3, courses.get(0).startNode);
+        assertEquals(2, courses.get(0).step);
+    }
+
+    /** The 11-小节 作息 from the reported device, against a 6-大节 page. */
+    private static List<AppSettings.ClassTime> deviceClassTimes() {
+        List<AppSettings.ClassTime> times = new ArrayList<>();
+        times.add(new AppSettings.ClassTime(1, 8 * 60, 8 * 60 + 45));
+        times.add(new AppSettings.ClassTime(2, 8 * 60 + 50, 9 * 60 + 35));
+        times.add(new AppSettings.ClassTime(3, 9 * 60 + 55, 10 * 60 + 40));
+        times.add(new AppSettings.ClassTime(4, 10 * 60 + 45, 11 * 60 + 30));
+        times.add(new AppSettings.ClassTime(5, 11 * 60 + 35, 12 * 60 + 20));
+        times.add(new AppSettings.ClassTime(6, 14 * 60, 14 * 60 + 45));
+        times.add(new AppSettings.ClassTime(7, 14 * 60 + 50, 15 * 60 + 35));
+        times.add(new AppSettings.ClassTime(8, 15 * 60 + 55, 16 * 60 + 40));
+        times.add(new AppSettings.ClassTime(9, 16 * 60 + 45, 17 * 60 + 30));
+        times.add(new AppSettings.ClassTime(10, 17 * 60 + 35, 18 * 60 + 20));
+        times.add(new AppSettings.ClassTime(11, 19 * 60, 19 * 60 + 45));
+        return times;
+    }
+
+    @Test
+    public void pageSectionNumberingDecidesGridRowRegardlessOfLocalClassTimes() throws Exception {
+        // 第6节 19:20~21:45 against an 11-小节 local table. The page's own numbering stays
+        // authoritative: remapping the clock onto local rows is what made adjacent 大节 collide.
+        // The mismatch is resolved by adopting the page's 作息 (see pagePeriods), not by guessing.
+        String payload = "{\"items\":[{\"name\":\"高性能计算与计算机体系结构\",\"day\":1,"
+                + "\"section\":6,\"startTime\":\"1920\",\"endTime\":\"2145\","
+                + "\"weeks\":\"1-16周\"}]}";
+        ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(
+                JSONObject.quote(payload), ImportAdapter.GENERIC, deviceClassTimes());
+
+        Course course = outcome.courses.get(0);
+        assertEquals(6, course.startNode);
+        assertEquals(1, course.step);
+        assertEquals(19 * 60 + 20, course.startMinute);
+        assertEquals(21 * 60 + 45, course.endMinute);
+    }
+
+    @Test
+    public void explicitClockAlwaysWinsOverLocalClassTimes() throws Exception {
+        // 第1节 8:00~9:35 is a 大节; the local 第1节 ends at 8:45. The alarm follows the page.
+        String payload = "{\"items\":[{\"name\":\"信号与系统\",\"day\":1,\"section\":1,"
+                + "\"startTime\":\"0800\",\"endTime\":\"0935\",\"weeks\":\"1-16周\"}]}";
+        ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(
+                JSONObject.quote(payload), ImportAdapter.GENERIC, deviceClassTimes());
+
+        Course course = outcome.courses.get(0);
+        assertEquals(1, course.startNode);
+        assertEquals(8 * 60, course.startMinute);
+        assertEquals(9 * 60 + 35, course.endMinute);
+    }
+
+    @Test
+    public void pagePeriodsCarryTheStructureStatedByTheLabelColumn() throws Exception {
+        // The scanner reports the page's own 作息 so the app can offer it instead of forcing a
+        // 6-大节 timetable onto a table cut into 45-minute 小节.
+        String payload = "{\"items\":[{\"name\":\"信号与系统\",\"day\":1,\"section\":1,"
+                + "\"startTime\":\"0800\",\"endTime\":\"0935\",\"weeks\":\"1-16周\"}],"
+                + "\"periods\":[{\"period\":1,\"startTime\":\"8:00\",\"endTime\":\"9:35\"},"
+                + "{\"period\":2,\"startTime\":\"9:50\",\"endTime\":\"12:15\"},"
+                + "{\"period\":6,\"startTime\":\"19:20\",\"endTime\":\"21:45\"}]}";
+        ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(
+                JSONObject.quote(payload), ImportAdapter.GENERIC, deviceClassTimes());
+
+        assertEquals(3, outcome.pagePeriods.size());
+        assertEquals(1, outcome.pagePeriods.get(0).period);
+        assertEquals(8 * 60, outcome.pagePeriods.get(0).startMinute);
+        assertEquals(9 * 60 + 35, outcome.pagePeriods.get(0).endMinute);
+        assertEquals(6, outcome.pagePeriods.get(2).period);
+        assertEquals(19 * 60 + 20, outcome.pagePeriods.get(2).startMinute);
+        assertEquals(21 * 60 + 45, outcome.pagePeriods.get(2).endMinute);
+    }
+
+    @Test
+    public void malformedPagePeriodsAreDropped() throws Exception {
+        String payload = "{\"items\":[{\"name\":\"信号与系统\",\"day\":1,\"section\":1,"
+                + "\"weeks\":\"1-16周\"}],"
+                + "\"periods\":[{\"period\":0,\"startTime\":\"8:00\",\"endTime\":\"9:35\"},"
+                + "{\"period\":2,\"startTime\":\"9:50\",\"endTime\":\"9:50\"},"
+                + "{\"period\":3,\"startTime\":\"\",\"endTime\":\"15:05\"},"
+                + "{\"period\":4,\"startTime\":\"15:20\",\"endTime\":\"16:55\"}]}";
+        ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(
+                JSONObject.quote(payload), ImportAdapter.GENERIC, null);
+
+        assertEquals(1, outcome.pagePeriods.size());
+        assertEquals(4, outcome.pagePeriods.get(0).period);
+    }
+
+    @Test
+    public void pagesWithoutPeriodLabelsReportNoStructure() throws Exception {
+        String payload = "{\"items\":[{\"name\":\"信号与系统\",\"day\":1,\"section\":1,"
+                + "\"weeks\":\"1-16周\"}]}";
+        ImportParser.ImportOutcome outcome = ImportParser.parseOutcome(
+                JSONObject.quote(payload), ImportAdapter.GENERIC, null);
+
+        assertTrue(outcome.pagePeriods.isEmpty());
+    }
+
+    @Test
+    public void parsesExplicitClockWrittenWithFullWidthTilde() throws Exception {
+        String payload = "{\"items\":[{\"day\":1,\"section\":1,"
+                + "\"weeks\":\"1-16周\",\"text\":\"信号与系统\\n8:00～9:35\"}]}";
+
+        List<Course> courses = ImportParser.parseJavascriptResult(
+                JSONObject.quote(payload), ImportAdapter.GENERIC);
+
+        assertEquals(1, courses.size());
+        assertEquals(8 * 60, courses.get(0).startMinute);
+        assertEquals(9 * 60 + 35, courses.get(0).endMinute);
+    }
 }

@@ -27,6 +27,7 @@ public final class ImportScript {
             let visualNodes = 0;
             let recordRows = 0;
             let missingWeekCandidates = 0;
+            const pagePeriods = [];
             let selectedSource = 'page-dom';
             let domPassSkipped = 0;
             let qiangzhiFallback = 0;
@@ -113,7 +114,7 @@ public final class ImportScript {
               return '';
             }
             function compactEamsWeeks(value) {
-              const match = clean(value).match(/[（(]\\s*((?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?)(?:\\s*[,，、]\\s*(?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?))*)\\s*([单双])?\\s*[,，]/);
+              const match = clean(value).match(/[（(]\\s*((?:\\d{1,2}\\s*(?:[-~～－–至—]\\s*\\d{1,2})?)(?:\\s*[,，、]\\s*(?:\\d{1,2}\\s*(?:[-~～－–至—]\\s*\\d{1,2})?))*)\\s*([单双])?\\s*[,，]/);
               if (!match) return '';
               return clean(match[1]) + '周' + (match[2] ? '(' + match[2] + ')' : '');
             }
@@ -121,30 +122,49 @@ public final class ImportScript {
               if (!table) return '';
               const compact = nodeText(table).replace(/\\s+/g, '');
               const signatures = [
-                /0?8:00[-~至—]0?9:35/,
-                /0?9:50[-~至—]12:15/,
-                /13:30[-~至—]15:05/,
-                /15:20[-~至—]16:55/,
-                /17:05[-~至—]18:40/,
-                /19:20[-~至—]21:45/
+                /0?8:00[-~～－–至—]0?9:35/,
+                /0?9:50[-~～－–至—]12:15/,
+                /13:30[-~～－–至—]15:05/,
+                /15:20[-~～－–至—]16:55/,
+                /17:05[-~～－–至—]18:40/,
+                /19:20[-~～－–至—]21:45/
               ];
               const matches = signatures.filter(pattern => pattern.test(compact)).length;
-              return matches >= 4 ? 'sixteen-week-halves' : '';
+              if (matches >= 4) return 'sixteen-week-halves';
+              // 半学期切分（前八周/后八周）是这类作息的判定特征，与厂商和域名无关；
+              // 其他教务的“全周/限选/任选”等通用词不作为判定依据，避免误套本规则。
+              if (/(?:前八周|后八周)/.test(compact)) return 'sixteen-week-halves';
+              return '';
             }
             function descriptiveWeeks(value, profile) {
               if (profile !== 'sixteen-week-halves') return '';
               const compact = clean(value).replace(/\\s+/g, '');
-              if (/前八周/.test(compact)) return '1-8周';
-              if (/后八周/.test(compact)) return '9-16周';
-              if (/(?:全周|整个学期|整学期|全学期)/.test(compact)) return '1-16周';
-              if (/单周/.test(compact)) return '1-16周(单)';
-              if (/双周/.test(compact)) return '1-16周(双)';
+              // 清华大学特有的周次描述
+              if (/前八周/.test(compact)) {
+                // 检查是否有单双周标记
+                if (/单周/.test(compact)) return '1-8周(单)';
+                if (/双周/.test(compact)) return '1-8周(双)';
+                return '1-8周';
+              }
+              if (/后八周/.test(compact)) {
+                if (/单周/.test(compact)) return '9-16周(单)';
+                if (/双周/.test(compact)) return '9-16周(双)';
+                return '9-16周';
+              }
+              if (/(?:全周|整个学期|整学期|全学期)/.test(compact)) {
+                if (/单周/.test(compact)) return '1-16周(单)';
+                if (/双周/.test(compact)) return '1-16周(双)';
+                return '1-16周';
+              }
+              // 独立的单双周标记（无前后八周说明时，默认整个学期）
+              if (/^单周$/.test(compact) || /^\\(单周?\\)$/.test(compact)) return '1-16周(单)';
+              if (/^双周$/.test(compact) || /^\\(双周?\\)$/.test(compact)) return '1-16周(双)';
               return '';
             }
             function courseFields(node, text, profile) {
               const lines = clean(text).split('\\n').map(clean).filter(Boolean);
               const weekLine = lines.findIndex(line =>
-                /\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?.*周/.test(line));
+                /\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?.*周/.test(line));
               let name = attribute(node, ['data-course-name', 'data-kcmc', 'data-name']) ||
                 childText(node, ['.course-name', '.kcmc', '.title', '[class*="courseName"]',
                   '[class*="course-name"]', '[class*="kcmc"]']) ||
@@ -164,14 +184,27 @@ public final class ImportScript {
                   '.week', '.zcd', '[class*="weekText"]',
                 '[class*="week-text"]', '[class*="zcd"]']) ||
                 labeledText(text, ['上课周次', '周次', '周数']);
+              // 优先尝试描述性周次（清华大学）
+              if (!weeks && profile === 'sixteen-week-halves') {
+                weeks = descriptiveWeeks(text, profile);
+              }
               if (!weeks) weeks = compactEamsWeeks(text);
-              if (!weeks) weeks = descriptiveWeeks(text, profile);
+              if (!weeks && profile !== 'sixteen-week-halves') {
+                weeks = descriptiveWeeks(text, profile);
+              }
               if (!name && lines.length && !/^(?:第?[一二三四五六七八九十\\d]+节|上午|下午|晚上|早晨)$/.test(lines[0])
-                  && !/\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?.*周/.test(lines[0])) {
+                  && !/\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?.*周/.test(lines[0])) {
                 name = lines[0];
               }
+              // 单格格式 "课程名(教师；属性；周次；教室)" 整行同时含数字和“周”，上面的通用规则
+              // 会放弃取名，没有教室的课程（科创、体育）因此整条丢失。按行尾那个以分号分隔
+              // 元数据的括号组切分，课名自身携带的 "（第二外国语）（1）" 等括号不受影响。
+              if (!name && lines.length) {
+                const bracketed = lines[0].match(/^(.+?)\\s*[（(][^（()）]*[；;][^（()）]*[）)]\\s*$/);
+                if (bracketed) name = clean(bracketed[1]);
+              }
               if (!weeks && weekLine >= 0) {
-                const match = lines[weekLine].match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周/);
+                const match = lines[weekLine].match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?)*\\s*周/);
                 if (match) weeks = clean(match[0]);
               }
               if (!teacher && weekLine >= 0 && lines[weekLine + 1] &&
@@ -191,10 +224,12 @@ public final class ImportScript {
                     /(?:限选|必选|任选|全周|前八周|后八周|单周|双周|上课地点|教室)/.test(part))) {
                   name = parts[0];
                 }
+                // 清除课程名称中的周次描述标记
+                name = name.replace(/[（(]?(?:前八周|后八周|全周|单周|双周)[）)]?/g, '').trim();
               }
               const weekMarker = weeks.search(/[（(]周[）)]/);
               if (weekMarker >= 0) weeks = clean(weeks.slice(0, weekMarker));
-              const describedWeeks = weeks.match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周(?:\\s*[（(]?[单双]周?[）)]?)?/);
+              const describedWeeks = weeks.match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?)*\\s*周(?:\\s*[（(]?[单双]周?[）)]?)?/);
               if (describedWeeks) weeks = clean(describedWeeks[0]);
               return {name, teacher, location, weeks};
             }
@@ -217,7 +252,7 @@ public final class ImportScript {
                   !/课|程|学|实验|设计|理论|基础|导论|概论|原理|技术|方法/.test(compact)) return;
               let weeks = clean(fields.weeks || '');
               if (!weeks) {
-                const weekMatch = text.match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周/);
+                const weekMatch = text.match(/(?:第\\s*)?\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?)*\\s*周/);
                 if (weekMatch) weeks = clean(weekMatch[0]);
               }
               if (!weeks) weeks = compactEamsWeeks(text);
@@ -241,7 +276,7 @@ public final class ImportScript {
             }
             function add(day, section, endSection, node, parity, timing, profile) {
               const text = nodeText(node);
-              if (/\\{[^}]*第?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?周[^}]*\\}/.test(text)) {
+              if (/\\{[^}]*第?\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?周[^}]*\\}/.test(text)) {
                 addCourseBlock(day, section, endSection, node, parity, timing, profile);
                 return;
               }
@@ -254,7 +289,7 @@ public final class ImportScript {
               const tokens = text.split(/\\s+/).filter(Boolean);
               const timeIndexes = [];
               tokens.forEach((token, index) => {
-                if (/\\{[^}]*第?\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?周[^}]*\\}/.test(token)) {
+                if (/\\{[^}]*第?\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?周[^}]*\\}/.test(token)) {
                   timeIndexes.push(index);
                 }
               });
@@ -268,7 +303,7 @@ public final class ImportScript {
                   const name = nameIndex >= 0 ? tokens[nameIndex] : '';
                   const teacher = index + 1 < limit ? tokens[index + 1] : '';
                   const location = index + 2 < limit ? tokens[index + 2] : '';
-                  const weeks = (tokens[index].match(/\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?)*\\s*周(?:\\s*[（(]?[单双]周?[）)]?)?/) || [])[0] || '';
+                  const weeks = (tokens[index].match(/\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?(?:\\s*[,，、]\\s*\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?)*\\s*周(?:\\s*[（(]?[单双]周?[）)]?)?/) || [])[0] || '';
                   const itemText = [name, teacher, location, weeks, tokens[index]]
                     .filter(Boolean).join('\\n');
                   addText(day, section, endSection, itemText, '',
@@ -324,9 +359,9 @@ public final class ImportScript {
             }
             function sectionFrom(value, fallback) {
               const text = clean(value);
-              let match = text.match(/(?:第)?(\\d{1,2})(?:\\s*[-~至—]\\s*\\d{1,2})?\\s*节(?!\\s*\\/\\s*周)/);
+              let match = text.match(/(?:第)?(\\d{1,2})(?:\\s*[-~～－–至—]\\s*\\d{1,2})?\\s*节(?!\\s*\\/\\s*周)/);
               if (match) return Number(match[1]);
-              match = text.match(/^\\s*(\\d{1,2})\\s*[-~至—、,，]\\s*(\\d{1,2})\\s*$/);
+              match = text.match(/^\\s*(\\d{1,2})\\s*[-~～－–至—、,，]\\s*(\\d{1,2})\\s*$/);
               if (match) return Number(match[1]);
               match = text.match(/(?:第)?\\s*([一二三四五六七八九十]+)\\s*节/);
               if (match) return chineseNumber(match[1]) || fallback;
@@ -335,12 +370,12 @@ public final class ImportScript {
             }
             function endSectionFrom(value, fallback) {
               const text = clean(value);
-              let match = text.match(/(?:第)?\\s*\\d{1,2}\\s*[-~至—、,，]\\s*(?:第)?\\s*(\\d{1,2})\\s*节/);
-              if (!match) match = text.match(/^\\s*\\d{1,2}\\s*[-~至—、,，]\\s*(\\d{1,2})\\s*$/);
+              let match = text.match(/(?:第)?\\s*\\d{1,2}\\s*[-~～－–至—、,，]\\s*(?:第)?\\s*(\\d{1,2})\\s*节/);
+              if (!match) match = text.match(/^\\s*\\d{1,2}\\s*[-~～－–至—、,，]\\s*(\\d{1,2})\\s*$/);
               return match ? Number(match[1]) : fallback;
             }
             function clockRange(value) {
-              const match = clean(value).match(/([01]?\\d|2[0-3])[:：](\\d{2})\\s*[-~至—]\\s*([01]?\\d|2[0-3])[:：](\\d{2})/);
+              const match = clean(value).match(/([01]?\\d|2[0-3])[:：](\\d{2})\\s*[-~～－–至—]\\s*([01]?\\d|2[0-3])[:：](\\d{2})/);
               if (!match) return {};
               return {startTime: match[1] + ':' + match[2], endTime: match[3] + ':' + match[4]};
             }
@@ -386,7 +421,7 @@ public final class ImportScript {
               let endSection = field(value, ['endSection', 'finishSection', 'endJc', 'endPeriod',
                 'jsjc', 'JSJC', 'mjj', 'MJJ', 'endUnit', 'endTimeUnit']);
               if (!endSection) {
-                const sectionRange = clean(section).match(/\\d{1,2}\\s*[-~至—]\\s*(\\d{1,2})/);
+                const sectionRange = clean(section).match(/\\d{1,2}\\s*[-~～－–至—]\\s*(\\d{1,2})/);
                 if (sectionRange) endSection = sectionRange[1];
               }
               const titleDetails = field(value, ['titleDetail', 'scheduleDetails',
@@ -397,7 +432,7 @@ public final class ImportScript {
                 for (const rawDetail of candidates) {
                   const detail = clean(rawDetail);
                   const match = detail.match(
-                    /^([0-9\\s,，、\\-~至—()（）单双周]+)\\s*(.*)$/);
+                    /^([0-9\\s,，、\\-~～－–至—()（）单双周]+)\\s*(.*)$/);
                   if (!match) continue;
                   const detailWeeks = clean(match[1]) || clean(weeks);
                   const detailLocation = clean(match[2]) || clean(location);
@@ -624,6 +659,59 @@ public final class ImportScript {
               let match = compact.match(/^(?:星期|周)([一二三四五六日天])/);
               if (!match) match = compact.match(/^([一二三四五六日天])$/);
               return match ? dayNumber(match[1]) : 0;
+            }
+            // The label column of a timetable states the page's own period structure, e.g.
+            // "第1节 8:00~9:35". Reporting it lets the app offer that 作息 instead of forcing the
+            // schedule onto a local table whose periods are cut on a different scale.
+            function keepPeriod(section, timing) {
+              section = sectionNumber(section);
+              if (!(section >= 1 && section <= 30) || !timing || !timing.startTime) return;
+              if (pagePeriods.some(item => item.period === section)) return;
+              pagePeriods.push({period: section, startTime: timing.startTime,
+                endTime: timing.endTime});
+            }
+            // Reads a label that numbers exactly one period, e.g. "第1节" or a bare "3". Deliberately
+            // stricter than the shared sectionFrom used for course placement: a label spanning
+            // several periods ("第1,2节 08:00-09:40", common in 正方) pairs its clock with two of
+            // them at once, so taking it as one period would report a coarser table than the page's
+            // own. Returns 0 for those, leaving such pages with no period table rather than a wrong one.
+            function labeledPeriod(value) {
+              // Strip clocks first: "第1节 8:00~9:35" carries digits and a separator of its own,
+              // which the span check below would otherwise read as a period range.
+              const compact = clean(value).replace(/\\s+/g, '')
+                .replace(/\\d{1,2}[:：]\\d{2}/g, '');
+              if (/(?:大节|小节)/.test(compact)) return 0;
+              // A label covering several periods ("第1,2节", "第3-4节") pairs one clock with two of
+              // them, so it does not describe a single period.
+              if (/(?:第)?\\d{1,2}[-~～－–至—、,，](?:第)?\\d{1,2}/.test(compact)) return 0;
+              let match = compact.match(/^(?:第)?(\\d{1,2})节/);
+              if (match) return Number(match[1]);
+              match = compact.match(/^(?:第)?([一二三四五六七八九十]+)节/);
+              if (match) return chineseNumber(match[1]);
+              match = compact.match(/^(\\d{1,2})$/);
+              return match ? Number(match[1]) : 0;
+            }
+            // Runs as its own pass over every table, independent of which ingest path claimed the
+            // courses: a page may hand its cells to the id/dataset scan or to a runtime model and
+            // still print its period clocks in the row labels. Only the leading label cells are
+            // read, and a row must state both a period number and a clock, so ordinary course
+            // cells never register.
+            function scanPagePeriods(root) {
+              for (const table of root.querySelectorAll('table')) {
+                for (const row of Array.from(table.rows || [])) {
+                  const cells = Array.from(row.cells || []);
+                  let section = 0;
+                  let timing = {};
+                  for (let index = 0; index < Math.min(3, cells.length); index++) {
+                    const label = nodeText(cells[index]);
+                    if (label.length > 60) break;
+                    if (!section) section = labeledPeriod(label);
+                    if (!timing.startTime) timing = clockRange(label);
+                    if (section && timing.startTime) break;
+                  }
+                  if (section && timing.startTime) keepPeriod(section, timing);
+                }
+              }
             }
             function scanTable(table, mode) {
               const profile = tableProfile(table);
@@ -887,7 +975,7 @@ public final class ImportScript {
                 const centerY = rect.top + rect.height / 2;
                 if (centerX < left || centerX > right || centerY < top || centerY > bottom) continue;
                 const className = String(node.className || '');
-                const hasWeek = /\\d{1,2}(?:\\s*[-~至—]\\s*\\d{1,2})?.*周/.test(text);
+                const hasWeek = /\\d{1,2}(?:\\s*[-~～－–至—]\\s*\\d{1,2})?.*周/.test(text);
                 const multiLine = text.split('\\n').filter(line => clean(line)).length >= 2;
                 const courseClass = /course|lesson|schedule|timetable|kb|activity|task|card/i
                   .test(className);
@@ -934,15 +1022,33 @@ public final class ImportScript {
                 }
               }
             }
+            // The clock for a cell lives in its row's label column, not in the cell itself. The
+            // id/dataset paths below have no row-label context of their own, so recover it from
+            // the row the cell sits in; without this the period grid falls back to the page's own
+            // section numbering, which may be coarser than the user's 作息.
+            function rowTiming(cell) {
+              let row = null;
+              try { row = cell.closest && cell.closest('tr'); } catch (_) {}
+              if (!row) return {};
+              for (const candidate of Array.from(row.cells || [])) {
+                if (candidate === cell) break;
+                const parsed = clockRange(nodeText(candidate));
+                if (parsed.startTime) return parsed;
+              }
+              return {};
+            }
             function scan(root) {
               for (const cell of root.querySelectorAll('td[id],div[id]')) {
                 const id = cell.id || '';
+                const timing = rowTiming(cell);
                 let match = id.match(/^(\\d)[-_](\\d{1,2})$/);
-                if (match) addCell(Number(match[1]), Number(match[2]), cell);
+                if (match) addCell(Number(match[1]), Number(match[2]), cell, '', 0, timing);
                 match = id.match(/^(\\d{1,2})[-_](\\d)$/);
-                if (match && Number(match[1]) > 7) addCell(Number(match[2]), Number(match[1]), cell);
+                if (match && Number(match[1]) > 7) {
+                  addCell(Number(match[2]), Number(match[1]), cell, '', 0, timing);
+                }
                 match = id.match(/(?:day|d|xq)[-_]?([1-7])[^0-9]+(?:section|s|jc)?[_-]?(\\d{1,2})/i);
-                if (match) addCell(Number(match[1]), Number(match[2]), cell);
+                if (match) addCell(Number(match[1]), Number(match[2]), cell, '', 0, timing);
               }
               for (const cell of root.querySelectorAll(
                   '[data-day],[data-weekday],[data-xq],[data-day-of-week],[data-course-day]')) {
@@ -951,7 +1057,7 @@ public final class ImportScript {
                 const section = cell.dataset.section || cell.dataset.period || cell.dataset.jc ||
                   cell.dataset.startSection || cell.dataset.periodIndex ||
                   sectionFrom(nodeText(cell), 1);
-                addCell(day, section, cell);
+                addCell(day, section, cell, '', 0, rowTiming(cell));
               }
               const zhengfang = root.querySelector('#kbgrid_table_0,#table1,#Table1');
               const qiangzhi = root.querySelector('#kbtable');
@@ -996,6 +1102,9 @@ public final class ImportScript {
               roots.forEach(scanVisualTimetable);
               if (output.length) selectedSource = 'visual-grid';
             }
+            roots.forEach(root => {
+              try { scanPagePeriods(root); } catch (_) {}
+            });
             const signature = docs.map(doc => {
               let href = '';
               try { href = doc.location && doc.location.href || ''; } catch (_) {}
@@ -1068,6 +1177,7 @@ public final class ImportScript {
               sourceUrl: location.href,
               pageTitle: document.title || '',
               term: '',
+              periods: pagePeriods.slice().sort((a, b) => a.period - b.period),
               diagnostics: {
                 frames: docs.length - 1,
                 shadowRoots: Math.max(0, roots.length - docs.length),

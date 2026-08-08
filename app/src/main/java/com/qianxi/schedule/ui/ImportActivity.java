@@ -43,6 +43,7 @@ import android.widget.Toast;
 import com.qianxi.schedule.data.AppSettings;
 import com.qianxi.schedule.data.Course;
 import com.qianxi.schedule.data.CourseDatabase;
+import com.qianxi.schedule.data.ScheduleTime;
 import com.qianxi.schedule.importer.AcademicShellRepair;
 import com.qianxi.schedule.importer.AcademicWebPolicy;
 import com.qianxi.schedule.importer.ImportAdapter;
@@ -845,7 +846,7 @@ public final class ImportActivity extends Activity {
                 }
                 setImporting(false);
                 recordDiagnostic("IMPORT-PREVIEW courses=" + outcome.courses.size());
-                showImportPreview(outcome);
+                offerPagePeriods(value, adapter, outcome);
             } catch (Exception exception) {
                 setImporting(false);
                 recordDiagnostic("IMPORT-PARSE-ERROR " + exception.getClass().getSimpleName()
@@ -853,6 +854,80 @@ public final class ImportActivity extends Activity {
                 showImportError("页面数据解析失败：" + exception.getMessage());
             }
         });
+    }
+
+    /**
+     * A page may cut its periods on a coarser scale than the local 作息: 清华 prints six 大节
+     * ("第1节 8:00~9:35") while the local table holds eleven 45-minute 小节. There is no correct way
+     * to map one onto the other — a 95-minute 大节 either shrinks to a single short slot or spills
+     * into the row its neighbour needs — so offer the page's own structure instead of guessing.
+     * Declining keeps everything exactly as parsed; accepting re-parses so both the course clocks
+     * and the grid rows follow the adopted 作息.
+     */
+    private void offerPagePeriods(String payload, String adapter,
+                                  ImportParser.ImportOutcome outcome) {
+        List<AppSettings.ClassTime> pagePeriods = outcome.pagePeriods;
+        List<AppSettings.ClassTime> local = settings.classTimes();
+        if (!periodsWorthAdopting(pagePeriods, local)) {
+            showImportPreview(outcome);
+            return;
+        }
+        recordDiagnostic(String.format(Locale.CHINA, "IMPORT-PERIODS page=%d local=%d",
+                pagePeriods.size(), local.size()));
+        StringBuilder message = new StringBuilder();
+        message.append("这份课表按 ").append(pagePeriods.size())
+                .append(" 节划分，与当前作息（").append(local.size())
+                .append(" 节）不一致。按页面作息导入才能让每节课落在正确的时间和格子上。\n\n");
+        for (AppSettings.ClassTime period : pagePeriods) {
+            message.append("第").append(period.period).append("节  ")
+                    .append(ScheduleTime.formatMinutes(period.startMinute)).append('-')
+                    .append(ScheduleTime.formatMinutes(period.endMinute)).append('\n');
+        }
+        message.append("\n采用后会覆盖当前作息表，之后可在设置中修改。");
+        new AlertDialog.Builder(this)
+                .setTitle("页面作息与本地不同")
+                .setMessage(message.toString())
+                .setNegativeButton("保留本地作息", (dialog, which) -> showImportPreview(outcome))
+                .setPositiveButton("采用页面作息", (dialog, which) -> {
+                    settings.setClassTimes(pagePeriods);
+                    ImportParser.ImportOutcome adopted = outcome;
+                    try {
+                        adopted = ImportParser.parseOutcome(payload, adapter, settings.classTimes());
+                    } catch (Exception exception) {
+                        recordDiagnostic("IMPORT-PERIODS-REPARSE-ERROR "
+                                + exception.getClass().getSimpleName());
+                    }
+                    showImportPreview(adopted);
+                })
+                .show();
+    }
+
+    /**
+     * True when the page states a period structure that is both usable on its own and materially
+     * different from the local one. A page listing only a couple of clocks, or numbering them with
+     * gaps, would yield a crippled 作息, so require a contiguous run starting at 第1节. Differences
+     * under ten minutes are rounding in the page's own labels, not a different structure — pages
+     * whose periods already match the local table never raise the prompt.
+     */
+    private static boolean periodsWorthAdopting(List<AppSettings.ClassTime> pagePeriods,
+                                                List<AppSettings.ClassTime> local) {
+        if (pagePeriods == null || pagePeriods.size() < 3) return false;
+        for (int index = 0; index < pagePeriods.size(); index++) {
+            AppSettings.ClassTime period = pagePeriods.get(index);
+            if (period == null || period.period != index + 1) return false;
+            if (period.endMinute <= period.startMinute) return false;
+        }
+        if (local == null || local.isEmpty() || local.size() != pagePeriods.size()) return true;
+        for (int index = 0; index < pagePeriods.size(); index++) {
+            AppSettings.ClassTime page = pagePeriods.get(index);
+            AppSettings.ClassTime mine = local.get(index);
+            if (mine == null) return true;
+            if (Math.abs(page.startMinute - mine.startMinute) >= 10
+                    || Math.abs(page.endMinute - mine.endMinute) >= 10) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String emptyImportMessage(ImportParser.ImportOutcome outcome) {
@@ -925,7 +1000,7 @@ public final class ImportActivity extends Activity {
         for (int i = 0; i < limit; i++) {
             Course course = outcome.courses.get(i);
             preview.append(course.name).append("  ·  周").append(chineseDay(course.dayOfWeek))
-                    .append(' ').append(com.qianxi.schedule.data.ScheduleTime.formatMinutes(course.startMinute));
+                    .append(' ').append(ScheduleTime.formatMinutes(course.startMinute));
             if (!course.location.isEmpty()) preview.append("  ·  ").append(course.location);
             preview.append('\n');
         }

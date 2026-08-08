@@ -26,6 +26,39 @@ public final class BackupManagerTest {
         assertEquals(510, backup.courses.get(0).startMinute);
     }
 
+    /** A per-course clock override only survives a backup round-trip if the node range does too. */
+    @Test
+    public void keepsGridPositionAndCustomMinutes() throws Exception {
+        String raw = "{\"schema\":1,\"app\":\"QianxiSchedule\","
+                + "\"semesterStart\":\"2026-09-07\",\"courses\":[{\"name\":\"物理实验\","
+                + "\"teacher\":\"\",\"location\":\"B203\",\"dayOfWeek\":3,"
+                + "\"startMinute\":840,\"endMinute\":1020,\"startNode\":6,\"step\":3,"
+                + "\"startWeek\":1,\"endWeek\":16,\"parity\":0,\"weekMask\":0}],\"profiles\":[]}";
+
+        Course course = BackupManager.decode(raw).courses.get(0);
+
+        assertEquals(6, course.startNode);
+        assertEquals(3, course.step);
+        assertEquals(8, course.endNode());
+        assertEquals(840, course.startMinute);
+        assertEquals(1020, course.endMinute);
+    }
+
+    /** Backups written before the grid columns existed leave the node fields to be derived later. */
+    @Test
+    public void leavesLegacyGridPositionUnset() throws Exception {
+        String raw = "{\"schema\":1,\"app\":\"QianxiSchedule\","
+                + "\"semesterStart\":\"2026-09-07\",\"courses\":[{\"name\":\"高等数学\","
+                + "\"teacher\":\"\",\"location\":\"\",\"dayOfWeek\":1,"
+                + "\"startMinute\":600,\"endMinute\":690,"
+                + "\"startWeek\":1,\"endWeek\":16,\"parity\":0,\"weekMask\":0}],\"profiles\":[]}";
+
+        Course course = BackupManager.decode(raw).courses.get(0);
+
+        assertEquals(0, course.startNode);
+        assertEquals(0, course.step);
+    }
+
     @Test(expected = org.json.JSONException.class)
     public void rejectsUnsupportedSchema() throws Exception {
         BackupManager.decode("{\"schema\":99,\"app\":\"QianxiSchedule\",\"courses\":[]}");

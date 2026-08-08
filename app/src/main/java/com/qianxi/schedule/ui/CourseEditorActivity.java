@@ -2,6 +2,7 @@ package com.qianxi.schedule.ui;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.TimePickerDialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Bundle;
@@ -48,10 +49,22 @@ public final class CourseEditorActivity extends Activity {
         int dayOfWeek = 1;
         int startNode = 1;
         int endNode = 2;
+        /**
+         * Per-segment clock override. -1 means "follow the 作息 table", i.e. the times are derived
+         * from the node range. A course whose real start/end differs from its 作息 slot (a lab that
+         * runs 14:00–17:00 inside the periods 6–8 block, a make-up class shifted half an hour) can
+         * set these without disturbing the shared 作息 or where the card sits in the grid.
+         */
+        int customStartMinute = -1;
+        int customEndMinute = -1;
         final boolean[] weeks = new boolean[60];
 
         Segment() {
             for (int i = 0; i < 20; i++) weeks[i] = true; // default 1-20
+        }
+
+        boolean hasCustomTime() {
+            return customStartMinute >= 0 && customEndMinute > customStartMinute;
         }
     }
 
@@ -124,6 +137,15 @@ public final class CourseEditorActivity extends Activity {
             int[] range = ScheduleTime.nodeRange(classTimes, c.startMinute, c.endMinute);
             segment.startNode = range[0];
             segment.endNode = range[1];
+        }
+        // Stored minutes that do not match the node's 作息 window are a per-course override (either
+        // set here earlier, or carried in from a minute-based import). Keep them instead of snapping
+        // the course back onto the grid the next time it is saved.
+        int slotStart = ScheduleTime.startMinuteForNode(classTimes, segment.startNode);
+        int slotEnd = ScheduleTime.endMinuteForNode(classTimes, segment.endNode);
+        if (c.endMinute > c.startMinute && (c.startMinute != slotStart || c.endMinute != slotEnd)) {
+            segment.customStartMinute = c.startMinute;
+            segment.customEndMinute = c.endMinute;
         }
         for (int i = 0; i < 60; i++) segment.weeks[i] = false;
         if (c.weekMask != 0L) {
@@ -303,6 +325,31 @@ public final class CourseEditorActivity extends Activity {
             timeParams.topMargin = Ui.dp(this, 4);
             card.addView(timeValue, timeParams);
 
+            // Clock row: tap to give this one segment its own start/end time, independent of the
+            // shared 作息. Long-press clears the override and goes back to following 作息.
+            TextView clockValue = Ui.text(this, clockSummary(segment), 13,
+                    segment.hasCustomTime() ? Ui.ACCENT : Ui.MUTED);
+            clockValue.setPadding(Ui.dp(this, 10), Ui.dp(this, 9), Ui.dp(this, 10), Ui.dp(this, 9));
+            clockValue.setBackground(Ui.rounded(
+                    segment.hasCustomTime() ? Color.rgb(255, 245, 236) : Color.rgb(244, 245, 243),
+                    6, this));
+            clockValue.setOnClickListener(v -> pickClockTime(index));
+            clockValue.setOnLongClickListener(v -> {
+                if (!segment.hasCustomTime()) {
+                    Toast.makeText(this, "该时间段本来就跟随作息", Toast.LENGTH_SHORT).show();
+                    return true;
+                }
+                segment.customStartMinute = -1;
+                segment.customEndMinute = -1;
+                refreshSegments();
+                Toast.makeText(this, "已恢复跟随作息", Toast.LENGTH_SHORT).show();
+                return true;
+            });
+            LinearLayout.LayoutParams clockParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            clockParams.topMargin = Ui.dp(this, 6);
+            card.addView(clockValue, clockParams);
+
             TextView weekValue = Ui.text(this, weekSummary(segment), 14, Ui.PRIMARY);
             weekValue.setPadding(Ui.dp(this, 10), Ui.dp(this, 10), Ui.dp(this, 10), Ui.dp(this, 10));
             weekValue.setBackground(Ui.rounded(Color.rgb(240, 247, 255), 6, this));
@@ -316,13 +363,35 @@ public final class CourseEditorActivity extends Activity {
         }
     }
 
+    /** Effective start minute: the per-course override when set, else the node's 作息 window. */
+    private int effectiveStartMinute(Segment segment) {
+        return segment.hasCustomTime()
+                ? segment.customStartMinute
+                : ScheduleTime.startMinuteForNode(classTimes, segment.startNode);
+    }
+
+    private int effectiveEndMinute(Segment segment) {
+        return segment.hasCustomTime()
+                ? segment.customEndMinute
+                : ScheduleTime.endMinuteForNode(classTimes, segment.endNode);
+    }
+
     private String timeSummary(Segment segment, String[] dayNames) {
         int day = Math.max(1, Math.min(7, segment.dayOfWeek));
-        int start = ScheduleTime.startMinuteForNode(classTimes, segment.startNode);
-        int end = ScheduleTime.endMinuteForNode(classTimes, segment.endNode);
         return String.format(Locale.CHINA, "%s   第 %d–%d 节   %s–%s",
                 dayNames[day - 1], segment.startNode, segment.endNode,
-                ScheduleTime.formatMinutes(start), ScheduleTime.formatMinutes(end));
+                ScheduleTime.formatMinutes(effectiveStartMinute(segment)),
+                ScheduleTime.formatMinutes(effectiveEndMinute(segment)));
+    }
+
+    /** Second line under the node row: whether this segment follows 作息 or its own clock times. */
+    private String clockSummary(Segment segment) {
+        if (!segment.hasCustomTime()) {
+            return "时间跟随作息   " + ScheduleTime.formatMinutes(effectiveStartMinute(segment))
+                    + "–" + ScheduleTime.formatMinutes(effectiveEndMinute(segment)) + "   点击单独设置";
+        }
+        return "已单独设置   " + ScheduleTime.formatMinutes(segment.customStartMinute)
+                + "–" + ScheduleTime.formatMinutes(segment.customEndMinute);
     }
 
     private String weekSummary(Segment segment) {
@@ -379,6 +448,75 @@ public final class CourseEditorActivity extends Activity {
                     refreshSegments();
                 })
                 .show();
+    }
+
+    /**
+     * Per-segment clock picker: gives this one time slot its own start/end time while leaving the
+     * shared 作息 and the segment's grid position (node range) untouched. "跟随作息" clears the override.
+     */
+    private void pickClockTime(int index) {
+        Segment segment = segments.get(index);
+        final int[] working = {effectiveStartMinute(segment), effectiveEndMinute(segment)};
+
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(Ui.dp(this, 20), Ui.dp(this, 10), Ui.dp(this, 20), Ui.dp(this, 6));
+        TextView startRow = clockRow(container, "开始时间");
+        TextView endRow = clockRow(container, "结束时间");
+        startRow.setText(ScheduleTime.formatMinutes(working[0]));
+        endRow.setText(ScheduleTime.formatMinutes(working[1]));
+
+        startRow.setOnClickListener(v -> new TimePickerDialog(this, (view, h, m) -> {
+            working[0] = h * 60 + m;
+            startRow.setText(ScheduleTime.formatMinutes(working[0]));
+            if (working[1] <= working[0]) {
+                working[1] = Math.min(24 * 60 - 1, working[0] + 45);
+                endRow.setText(ScheduleTime.formatMinutes(working[1]));
+            }
+        }, working[0] / 60, working[0] % 60, true).show());
+        endRow.setOnClickListener(v -> new TimePickerDialog(this, (view, h, m) -> {
+            int picked = h * 60 + m;
+            if (picked <= working[0]) {
+                Toast.makeText(this, "结束时间要晚于开始时间", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            working[1] = picked;
+            endRow.setText(ScheduleTime.formatMinutes(working[1]));
+        }, working[1] / 60, working[1] % 60, true).show());
+
+        new AlertDialog.Builder(this)
+                .setTitle("单独设置上课时刻")
+                .setView(container)
+                .setNeutralButton("跟随作息", (dialog, which) -> {
+                    segment.customStartMinute = -1;
+                    segment.customEndMinute = -1;
+                    refreshSegments();
+                })
+                .setNegativeButton("取消", null)
+                .setPositiveButton("确定", (dialog, which) -> {
+                    segment.customStartMinute = working[0];
+                    segment.customEndMinute = working[1];
+                    refreshSegments();
+                })
+                .show();
+    }
+
+    /** Label + tappable value row used by the per-segment clock dialog. */
+    private TextView clockRow(LinearLayout parent, String label) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(Ui.text(this, label, 15, Ui.INK),
+                new LinearLayout.LayoutParams(0, Ui.dp(this, 52), 1));
+        TextView value = Ui.text(this, "", 17, Ui.PRIMARY);
+        value.setGravity(Gravity.CENTER);
+        value.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        value.setBackground(Ui.rounded(Color.rgb(240, 247, 255), 6, this));
+        LinearLayout.LayoutParams valueParams =
+                new LinearLayout.LayoutParams(Ui.dp(this, 104), Ui.dp(this, 42));
+        row.addView(value, valueParams);
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return value;
     }
 
     private NumberPicker picker(String[] values, int selected) {
@@ -504,8 +642,16 @@ public final class CourseEditorActivity extends Activity {
             course.dayOfWeek = Math.max(1, Math.min(7, segment.dayOfWeek));
             course.startNode = start;
             course.step = end - start + 1;
-            course.startMinute = ScheduleTime.startMinuteForNode(classTimes, start);
-            course.endMinute = ScheduleTime.endMinuteForNode(classTimes, end);
+            // The node range keeps driving where the card sits in the grid; the minutes are what the
+            // silence alarm and the "next class" card read, so a per-segment override only changes
+            // those two and leaves the layout alone.
+            if (segment.hasCustomTime()) {
+                course.startMinute = segment.customStartMinute;
+                course.endMinute = segment.customEndMinute;
+            } else {
+                course.startMinute = ScheduleTime.startMinuteForNode(classTimes, start);
+                course.endMinute = ScheduleTime.endMinuteForNode(classTimes, end);
+            }
             course.weekMask = mask;
             course.startWeek = Long.numberOfTrailingZeros(mask) + 1;
             course.endWeek = 64 - Long.numberOfLeadingZeros(mask);

@@ -50,13 +50,19 @@ public final class ImportParser {
         public final int visualNodes;
         public final List<String> candidateSamples;
         public final List<String> fingerprints;
+        /**
+         * The period structure stated by the page's own label column, when it provides one.
+         * Empty when the page does not spell out per-period clocks.
+         */
+        public final List<AppSettings.ClassTime> pagePeriods;
 
         ImportOutcome(List<Course> courses, String adapterId, String layout, String source, String sourceUrl,
                       String pageTitle, String term, String campus, int rawItems, int skippedItems,
                       int frames, int shadowRoots, int tables, int candidates,
                       int missingWeekCandidates, int runtimeActivities,
                       int recordRows, int visualCandidates, int visualDays, int visualSections, int visualNodes,
-                      List<String> candidateSamples, List<String> fingerprints) {
+                      List<String> candidateSamples, List<String> fingerprints,
+                      List<AppSettings.ClassTime> pagePeriods) {
             this.courses = courses;
             this.adapterId = adapterId;
             this.layout = layout;
@@ -80,6 +86,7 @@ public final class ImportParser {
             this.visualNodes = visualNodes;
             this.candidateSamples = candidateSamples;
             this.fingerprints = fingerprints;
+            this.pagePeriods = pagePeriods;
         }
     }
 
@@ -152,6 +159,17 @@ public final class ImportParser {
                 fingerprints.add(summary.toString());
             }
         }
+        List<AppSettings.ClassTime> pagePeriods = new ArrayList<>();
+        JSONArray periodArray = root.optJSONArray("periods");
+        for (int i = 0; periodArray != null && i < periodArray.length(); i++) {
+            JSONObject item = periodArray.optJSONObject(i);
+            if (item == null) continue;
+            int period = item.optInt("period", 0);
+            int start = parseClock(item.optString("startTime", ""));
+            int end = parseClock(item.optString("endTime", ""));
+            if (period < 1 || period > 30 || start < 0 || end <= start) continue;
+            pagePeriods.add(new AppSettings.ClassTime(period, start, end));
+        }
         return new ImportOutcome(new ArrayList<>(merged.values()), adapter,
                 root.optString("layout", "generic"),
                 root.optString("source", "page-dom"), root.optString("sourceUrl", ""),
@@ -168,7 +186,7 @@ public final class ImportParser {
                 diagnostics == null ? 0 : diagnostics.optInt("visualDays", 0),
                 diagnostics == null ? 0 : diagnostics.optInt("visualSections", 0),
                 diagnostics == null ? 0 : diagnostics.optInt("visualNodes", 0),
-                samples, fingerprints);
+                samples, fingerprints, pagePeriods);
     }
 
     private static Course parseItem(JSONObject item, String adapter,
@@ -244,7 +262,7 @@ public final class ImportParser {
         int start = parseClock(item.optString("startTime", ""));
         int end = parseClock(item.optString("endTime", ""));
         if (start >= 0 && end > start) return new int[]{start, end};
-        Matcher matcher = Pattern.compile("([01]?\\d|2[0-3])[:：](\\d{2})\\s*[-~至—]\\s*([01]?\\d|2[0-3])[:：](\\d{2})")
+        Matcher matcher = Pattern.compile("([01]?\\d|2[0-3])[:：](\\d{2})\\s*[-~～－–至—]\\s*([01]?\\d|2[0-3])[:：](\\d{2})")
                 .matcher(text);
         if (!matcher.find()) return null;
         start = integer(matcher.group(1), 8) * 60 + integer(matcher.group(2), 0);
@@ -312,10 +330,10 @@ public final class ImportParser {
             }
             if (high >= 1) return new int[]{low, high};
         }
-        Matcher matcher = Pattern.compile("第\\s*(\\d{1,2})\\s*(?:[-~至—]\\s*(\\d{1,2}))?\\s*节(?!\\s*/\\s*周)")
+        Matcher matcher = Pattern.compile("第\\s*(\\d{1,2})\\s*(?:[-~～－–至—]\\s*(\\d{1,2}))?\\s*节(?!\\s*/\\s*周)")
                 .matcher(text);
         if (!matcher.find()) {
-            matcher = Pattern.compile("(?:^|[\\s（(])\\s*(\\d{1,2})\\s*[-~至—]\\s*(\\d{1,2})\\s*节(?!\\s*/\\s*周)")
+            matcher = Pattern.compile("(?:^|[\\s（(])\\s*(\\d{1,2})\\s*[-~～－–至—]\\s*(\\d{1,2})\\s*节(?!\\s*/\\s*周)")
                     .matcher(text);
             if (!matcher.find()) return new int[]{fallbackStart, fallbackEnd};
         }
@@ -336,7 +354,7 @@ public final class ImportParser {
             }
             if (binMask != 0L) return binMask;
         }
-        Matcher area = Pattern.compile("((?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?\\s*[,，、]?\\s*)+)周(?:\\s*[（(]?(单|双)周?[）)]?)?")
+        Matcher area = Pattern.compile("((?:\\d{1,2}\\s*(?:[-~～－–至—]\\s*\\d{1,2})?\\s*[,，、]?\\s*)+)周(?:\\s*[（(]?(单|双)周?[）)]?)?")
                 .matcher(text);
         String values;
         String parity;
@@ -349,8 +367,8 @@ public final class ImportParser {
             // Classic EAMS abbreviates weeks as "(4-15,工学馆307)" without a 周 suffix.
             // Requiring a comma after 1-2 digit ranges avoids matching course codes.
             Matcher compact = Pattern.compile(
-                    "[（(]\\s*((?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?)"
-                            + "(?:\\s*[,，、]\\s*(?:\\d{1,2}\\s*(?:[-~至—]\\s*\\d{1,2})?))*)"
+                    "[（(]\\s*((?:\\d{1,2}\\s*(?:[-~～－–至—]\\s*\\d{1,2})?)"
+                            + "(?:\\s*[,，、]\\s*(?:\\d{1,2}\\s*(?:[-~～－–至—]\\s*\\d{1,2})?))*)"
                             + "\\s*(单|双)?\\s*[,，]")
                     .matcher(text == null ? "" : text);
             if (!compact.find()) return 0L;
@@ -360,7 +378,7 @@ public final class ImportParser {
         }
         if (parity.isEmpty()) parity = leadingParity(text, matchStart);
         long mask = 0L;
-        Matcher numbers = Pattern.compile("(\\d{1,2})(?:\\s*[-~至—]\\s*(\\d{1,2}))?").matcher(values);
+        Matcher numbers = Pattern.compile("(\\d{1,2})(?:\\s*[-~～－–至—]\\s*(\\d{1,2}))?").matcher(values);
         while (numbers.find()) {
             int first = integer(numbers.group(1), 1);
             int last = numbers.group(2) == null ? first : integer(numbers.group(2), first);
@@ -589,6 +607,10 @@ public final class ImportParser {
     private static String cleanupName(String value) {
         // Remove course code patterns like (3030113067.01), [3030113067.01], 【3030113067.01】
         value = value.replaceAll("[\\(（\\[【]\\d{8,}[^)）\\]】]*[\\)）\\]】]", "");
+        // A semicolon-separated group is the page's metadata bundle, e.g. "(李铁夫；限选；全周)"
+        // or "(陈志勇；限选；全周；六教6A112)". Without a room it carries neither comma nor digit,
+        // so the rules below would leave it inside the course title.
+        value = value.replaceAll("[\\(（][^)）]*[;；][^)）]*[\\)）]", "");
         // Remove multi-value groups: teacher lists "(吕宪伟,王强)" and week+room "(4-15,工学馆307)".
         // Any parenthesis group that contains a comma or a digit is metadata, never the course name.
         value = value.replaceAll("[\\(（][^)）]*[,，\\d][^)）]*[\\)）]", "");
@@ -606,8 +628,11 @@ public final class ImportParser {
 
     private static boolean isMetadata(String line) {
         String value = line.toLowerCase(Locale.ROOT);
+        // A week/section descriptor is a line made only of numbers, separators and 周/节 wording.
+        // Merely *ending* in 周 is not enough: a single-cell course string such as
+        // "科技创新与挑战3D(李铁夫；限选；全周)" ends that way and is a real course title.
         return value.matches("^(教师|老师|任课教师|地点|上课地点|教室|校区|周次|周数|节次|时间|学分|课程号|教学班).*?")
-                || value.matches(".*(?:周|节)\\s*[（(]?(?:单|双)?[）)]?$")
+                || value.matches("^[\\d\\s,，、()（）单双全周节第\\-~～－–至—]+$")
                 || value.matches("^\\d{1,2}[:：]\\d{2}.*");
     }
 

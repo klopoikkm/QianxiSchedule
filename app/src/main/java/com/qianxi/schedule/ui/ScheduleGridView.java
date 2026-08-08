@@ -393,10 +393,23 @@ public final class ScheduleGridView extends LinearLayout {
 
     private String cardText(Course c, int step) {
         StringBuilder text = new StringBuilder(c.name);
+        // A course whose own clock times differ from its 作息 slot shows them on the card: the axis
+        // on the left states the slot's time, so without this the override would be invisible here.
+        if (hasCustomTime(c)) {
+            text.append("\n").append(ScheduleTime.formatMinutes(c.startMinute))
+                    .append("-").append(ScheduleTime.formatMinutes(c.endMinute));
+        }
         if (!c.location.isEmpty()) text.append("\n@").append(c.location);
         // Only show the teacher when the card is tall enough to fit an extra line.
         if (step >= 2 && !c.teacher.isEmpty()) text.append("\n").append(c.teacher);
         return text.toString();
+    }
+
+    /** True when the course carries a per-course time that the active 作息 does not account for. */
+    private boolean hasCustomTime(Course c) {
+        if (classTimes.isEmpty() || c.startNode < 1 || c.step < 1) return false;
+        return c.startMinute != ScheduleTime.startMinuteForNode(classTimes, c.startNode)
+                || c.endMinute != ScheduleTime.endMinuteForNode(classTimes, c.endNode());
     }
 
     private int courseColor(Course c) {

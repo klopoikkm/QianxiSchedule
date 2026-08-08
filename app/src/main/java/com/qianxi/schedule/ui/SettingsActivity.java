@@ -194,6 +194,24 @@ public final class SettingsActivity extends Activity {
         bgRow.addView(pickBg, new LinearLayout.LayoutParams(Ui.dp(this, 60), Ui.dp(this, 52)));
         bgRow.addView(clearBg, new LinearLayout.LayoutParams(Ui.dp(this, 60), Ui.dp(this, 52)));
         content.addView(bgRow);
+
+        LinearLayout textEnhanceRow = row();
+        textEnhanceRow.addView(labels("课表文字增强", "背景图片与文字颜色相近时，添加蒙版提高清晰度"),
+                new LinearLayout.LayoutParams(0, Ui.dp(this, 70), 1));
+        Button enhanceMode = Ui.textButton(this, enhanceModeLabel(settings.textEnhancementMode()));
+        enhanceMode.setOnClickListener(v -> {
+            String[] modes = {"默认", "半透明蒙版", "深色蒙版"};
+            new AlertDialog.Builder(this)
+                    .setTitle("文字增强模式")
+                    .setItems(modes, (dialog, which) -> {
+                        settings.setTextEnhancementMode(which);
+                        enhanceMode.setText(enhanceModeLabel(which));
+                        Toast.makeText(this, "已切换到 " + modes[which], Toast.LENGTH_SHORT).show();
+                    })
+                    .show();
+        });
+        textEnhanceRow.addView(enhanceMode, new LinearLayout.LayoutParams(Ui.dp(this, 100), Ui.dp(this, 52)));
+        content.addView(textEnhanceRow);
         content.addView(Ui.divider(this));
 
         content.addView(Ui.sectionTitle(this, "教务登录"));
@@ -414,6 +432,16 @@ public final class SettingsActivity extends Activity {
         if (pendingBackup == null) return;
         BackupManager.Backup backup = pendingBackup;
         pendingBackup = null;
+        // Older backups carry no grid position; map their minutes onto the active 作息 so the
+        // restored courses land on the right rows instead of stacking on the first period.
+        java.util.List<AppSettings.ClassTime> times = settings.classTimes();
+        for (Course course : backup.courses) {
+            if (course.startNode >= 1 && course.step >= 1) continue;
+            int[] range = com.qianxi.schedule.data.ScheduleTime.nodeRange(
+                    times, course.startMinute, course.endMinute);
+            course.startNode = range[0];
+            course.step = Math.max(1, range[1] - range[0] + 1);
+        }
         CourseDatabase.get(this).importCourses(backup.courses, replace);
         if (replace) {
             settings.setSemesterStart(backup.semesterStart);
@@ -444,5 +472,13 @@ public final class SettingsActivity extends Activity {
         permissionStatus.setTextColor(policy && exact ? Ui.PRIMARY : Ui.ACCENT);
         semesterValue.setText(settings.semesterStart().format(
                 DateTimeFormatter.ofPattern("yyyy.M.d", Locale.CHINA)));
+    }
+
+    private String enhanceModeLabel(int mode) {
+        switch (mode) {
+            case 1: return "半透明";
+            case 2: return "深色";
+            default: return "默认";
+        }
     }
 }

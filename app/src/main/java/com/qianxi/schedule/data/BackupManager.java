@@ -108,6 +108,8 @@ public final class BackupManager {
                 .put("dayOfWeek", course.dayOfWeek)
                 .put("startMinute", course.startMinute)
                 .put("endMinute", course.endMinute)
+                .put("startNode", course.startNode)
+                .put("step", course.step)
                 .put("startWeek", course.startWeek)
                 .put("endWeek", course.endWeek)
                 .put("parity", course.parity)
@@ -135,6 +137,10 @@ public final class BackupManager {
         course.dayOfWeek = day;
         course.startMinute = start;
         course.endMinute = end;
+        // Pre-startNode backups (and hand-written ones) omit the grid position. 0 is the signal to
+        // derive it from the minutes at import time rather than silently pinning everything to node 1.
+        course.startNode = Math.max(0, value.optInt("startNode", 0));
+        course.step = Math.max(0, value.optInt("step", 0));
         course.startWeek = firstWeek;
         course.endWeek = lastWeek;
         course.parity = parity;

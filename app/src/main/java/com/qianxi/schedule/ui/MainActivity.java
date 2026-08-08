@@ -36,6 +36,7 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
     private CourseDatabase database;
     private ScheduleGridView scheduleGrid;
     private ImageView backgroundImage;
+    private View textEnhanceOverlay;
     private TextView weekLabel;
     private TextView weekSubLabel;
     private TextView silentStatus;
@@ -78,6 +79,11 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM, gradientColors);
         backgroundImage.setBackground(gradient);
         root.addView(backgroundImage, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Text enhancement overlay: improves readability when background image and text colors are similar.
+        textEnhanceOverlay = new View(this);
+        root.addView(textEnhanceOverlay, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         // Content layer.
@@ -212,6 +218,7 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
     protected void onResume() {
         super.onResume();
         applyBackground();
+        applyTextEnhancement();
         refresh();
     }
 
@@ -227,6 +234,22 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
             backgroundImage.setImageDrawable(drawable);
         } catch (Throwable t) {
             backgroundImage.setImageDrawable(null);
+        }
+    }
+
+    /** Applies text enhancement overlay based on user settings. */
+    private void applyTextEnhancement() {
+        int mode = settings.textEnhancementMode();
+        switch (mode) {
+            case 1: // Light overlay
+                textEnhanceOverlay.setBackgroundColor(Color.argb(128, 255, 255, 255));
+                break;
+            case 2: // Dark overlay
+                textEnhanceOverlay.setBackgroundColor(Color.argb(100, 0, 0, 0));
+                break;
+            default: // None
+                textEnhanceOverlay.setBackgroundColor(Color.TRANSPARENT);
+                break;
         }
     }
 
