@@ -149,14 +149,6 @@ public final class CourseDatabase extends SQLiteOpenHelper {
         return courses;
     }
 
-    public synchronized List<Course> forWeek(int week) {
-        List<Course> result = new ArrayList<>();
-        for (Course course : all()) {
-            if (course.occursInWeek(week)) result.add(course);
-        }
-        return result;
-    }
-
     public synchronized List<Course> conflicts(Course candidate) {
         return conflictsExcluding(candidate, java.util.Collections.emptySet());
     }

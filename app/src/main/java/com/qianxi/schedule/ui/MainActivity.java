@@ -23,6 +23,7 @@ import android.widget.TextView;
 import com.qianxi.schedule.data.AppSettings;
 import com.qianxi.schedule.data.Course;
 import com.qianxi.schedule.data.CourseDatabase;
+import com.qianxi.schedule.data.NextClass;
 import com.qianxi.schedule.data.ScheduleTime;
 import com.qianxi.schedule.silence.AlarmScheduler;
 
@@ -44,6 +45,24 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
     private TextView nextSummary;
     private Course summaryCourse;
     private int selectedWeek;
+    /** Courses backing the current render, reused by the per-minute summary tick. */
+    private List<Course> loadedCourses = new java.util.ArrayList<>();
+    private LocalDate renderedDate = LocalDate.now();
+    private final android.os.Handler ticker = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable minuteTick = new Runnable() {
+        @Override
+        public void run() {
+            // A card that says 正在上课 must stop saying it when the period ends, so re-resolve every
+            // minute while visible. Only the summary is recomputed unless the day itself rolled over,
+            // in which case the header date and today's column need rebuilding too.
+            if (LocalDate.now().equals(renderedDate)) {
+                updateSummary(loadedCourses);
+            } else {
+                refresh();
+            }
+            scheduleNextTick();
+        }
+    };
 
     private View insetTarget;
 
@@ -220,6 +239,20 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
         applyBackground();
         applyTextEnhancement();
         refresh();
+        scheduleNextTick();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        ticker.removeCallbacks(minuteTick);
+    }
+
+    /** Wakes at the next wall-clock minute so the summary flips exactly when a period does. */
+    private void scheduleNextTick() {
+        ticker.removeCallbacks(minuteTick);
+        long millisIntoMinute = System.currentTimeMillis() % 60_000L;
+        ticker.postDelayed(minuteTick, 60_000L - millisIntoMinute + 250L);
     }
 
     /** Loads the user's background image (sampled to screen size) or falls back to the gradient. */
@@ -277,8 +310,14 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
 
     private void refresh() {
         LocalDate start = ScheduleTime.weekStart(settings.semesterStart(), selectedWeek);
-        List<Course> courses = database.forWeek(selectedWeek);
-        boolean scheduleIsEmpty = database.all().isEmpty();
+        // One table read per refresh: the viewed week and the summary are both derived from it,
+        // where each database call used to re-scan the whole courses table.
+        loadedCourses = database.all();
+        renderedDate = LocalDate.now();
+        List<Course> courses = new java.util.ArrayList<>();
+        for (Course course : loadedCourses) {
+            if (course.occursInWeek(selectedWeek)) courses.add(course);
+        }
         // Big title (WakeUp parity): the top date is unconditionally today's real date, regardless
         // of which week is being viewed. WakeUp's CourseUtils.getTodayDate() never looks at the
         // selected week, and neither should we — the previous "today if selectedWeek==currentWeek
@@ -293,8 +332,8 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
         scheduleGrid.setData(courses, start, settings.classTimes());
         // A blank teaching week is valid (odd/even weeks, holidays, late semester). Only show the
         // add/import prompt when the entire timetable is empty; otherwise leave the week grid clean.
-        emptyState.setVisibility(scheduleIsEmpty ? View.VISIBLE : View.GONE);
-        updateSummary(scheduleIsEmpty);
+        emptyState.setVisibility(loadedCourses.isEmpty() ? View.VISIBLE : View.GONE);
+        updateSummary(loadedCourses);
     }
 
     /**
@@ -372,70 +411,52 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
     }
 
     /**
-     * The "next class" card always reflects the actual current moment, never the week the user
-     * happens to be viewing (it used to be gated by selectedWeek == currentWeek, so scrolling to
-     * another week or drifting past that comparison silently fell back to "courses.get(0)" of the
-     * VIEWED week's list, which had nothing to do with real time). Fetches the current week's own
-     * courses directly instead of reusing the possibly-different displayed week's list.
+     * The summary card is tied to the real clock, not the week the user is browsing, and resolves
+     * against calendar dates so a Friday evening points at next Monday's date rather than this
+     * week's Monday, which has already passed.
      */
-    private void updateSummary(boolean scheduleIsEmpty) {
+    private void updateSummary(List<Course> allCourses) {
         summaryCourse = null;
         LocalDate today = LocalDate.now();
-        int currentWeek = ScheduleTime.weekOf(settings.semesterStart(), today);
         int totalWeeks = settings.totalWeeks();
-        if (currentWeek > totalWeeks) {
-            nextSummary.setText("本学期已结束");
-            nextSummary.setTextColor(Ui.MUTED);
-            nextSummary.setClickable(false);
+        if (ScheduleTime.weekOf(settings.semesterStart(), today) > totalWeeks) {
+            showSummaryNotice("本学期已结束");
+            return;
+        }
+        if (allCourses.isEmpty()) {
+            showSummaryNotice("暂无课程 · 点击 + 添加或导入");
             return;
         }
 
-        List<Course> courses = database.forWeek(currentWeek);
-        if (courses.isEmpty()) {
-            nextSummary.setText(scheduleIsEmpty ? "暂无课程 · 点击 + 添加或导入" : "本周无课");
-            nextSummary.setTextColor(Ui.MUTED);
-            nextSummary.setClickable(false);
+        java.time.LocalTime clock = java.time.LocalTime.now();
+        int now = clock.getHour() * 60 + clock.getMinute();
+        NextClass found = NextClass.find(allCourses, settings.semesterStart(), totalWeeks, today, now);
+        if (found == null) {
+            showSummaryNotice("本学期剩余时间没有课");
             return;
         }
 
-        LocalDate weekStart = ScheduleTime.weekStart(settings.semesterStart(), currentWeek);
-        int now = java.time.LocalTime.now().getHour() * 60 + java.time.LocalTime.now().getMinute();
-        int todayIndex = today.getDayOfWeek().getValue();
-        Course ongoing = null;
-        Course next = null;
-        for (Course course : courses) {
-            if (course.dayOfWeek != todayIndex) continue;
-            if (course.startMinute <= now && now < course.endMinute) {
-                ongoing = course;
-                break;
-            }
-            if (course.startMinute > now && next == null) next = course;
-        }
-        if (ongoing != null) {
-            summaryCourse = ongoing;
+        summaryCourse = found.course;
+        String location = found.course.location.isEmpty() ? "" : " · " + found.course.location;
+        String day = chineseDay(found.date.getDayOfWeek().getValue());
+        String time = ScheduleTime.formatMinutes(found.course.startMinute);
+        if (found.kind == NextClass.Kind.ONGOING) {
             nextSummary.setText(String.format(Locale.CHINA, "正在上课 · 周%s %s\n%s%s",
-                    chineseDay(today.getDayOfWeek().getValue()), ScheduleTime.formatMinutes(ongoing.startMinute),
-                    ongoing.name, ongoing.location.isEmpty() ? "" : " · " + ongoing.location));
+                    day, time, found.course.name, location));
             nextSummary.setTextColor(Ui.PRIMARY);
         } else {
-            if (next == null) {
-                for (Course course : courses) {
-                    if (course.dayOfWeek > todayIndex) {
-                        next = course;
-                        break;
-                    }
-                }
-            }
-            if (next == null) next = courses.get(0);
-            summaryCourse = next;
-            LocalDate date = weekStart.plusDays(next.dayOfWeek - 1L);
-            nextSummary.setText(String.format(Locale.CHINA, "下一节 · 周%s %s %s\n%s%s",
-                    chineseDay(next.dayOfWeek), date.getMonthValue() + "." + date.getDayOfMonth(),
-                    ScheduleTime.formatMinutes(next.startMinute), next.name,
-                    next.location.isEmpty() ? "" : " · " + next.location));
+            nextSummary.setText(String.format(Locale.CHINA, "下一节 · %d.%d 周%s %s\n%s%s",
+                    found.date.getMonthValue(), found.date.getDayOfMonth(), day, time,
+                    found.course.name, location));
             nextSummary.setTextColor(Ui.INK);
         }
         nextSummary.setClickable(true);
+    }
+
+    private void showSummaryNotice(String message) {
+        nextSummary.setText(message);
+        nextSummary.setTextColor(Ui.MUTED);
+        nextSummary.setClickable(false);
     }
 
     private static String chineseDay(int day) {
