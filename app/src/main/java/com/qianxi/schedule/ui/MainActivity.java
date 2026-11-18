@@ -130,7 +130,7 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         silentStatus = Ui.text(this, "", 11, Ui.PRIMARY);
         silentStatus.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 4), 0);
-        silentStatus.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        silentStatus.setOnClickListener(v -> openSettings());
         subRow.addView(silentStatus, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams subRowParams = new LinearLayout.LayoutParams(
@@ -224,13 +224,20 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
                     startActivity(new Intent(this, ImportActivity.class));
                     return true;
                 case 3:
-                    startActivity(new Intent(this, SettingsActivity.class));
+                    openSettings();
                     return true;
                 default:
                     return false;
             }
         });
         popup.show();
+    }
+
+    private void openSettings() {
+        Intent intent = new Intent(this, SettingsActivity.class);
+        intent.putExtra(BackgroundEditorActivity.EXTRA_VIEWPORT_WIDTH, backgroundImage.getWidth());
+        intent.putExtra(BackgroundEditorActivity.EXTRA_VIEWPORT_HEIGHT, backgroundImage.getHeight());
+        startActivity(intent);
     }
 
     @Override
@@ -287,20 +294,11 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
     }
 
     private Drawable decodeSampledBackground(String path) {
-        android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        android.graphics.BitmapFactory.decodeFile(path, bounds);
-        int screenW = getResources().getDisplayMetrics().widthPixels;
-        int screenH = getResources().getDisplayMetrics().heightPixels;
-        int sample = 1;
-        while (bounds.outWidth / (sample * 2) >= screenW && bounds.outHeight / (sample * 2) >= screenH
-                && sample < 8) {
-            sample *= 2;
+        try {
+            return new BitmapDrawable(getResources(), BackgroundImageStore.decode(new java.io.File(path)));
+        } catch (java.io.IOException exception) {
+            return null;
         }
-        android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
-        opts.inSampleSize = sample;
-        android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeFile(path, opts);
-        return bitmap == null ? null : new BitmapDrawable(getResources(), bitmap);
     }
 
     private void changeWeek(int amount) {

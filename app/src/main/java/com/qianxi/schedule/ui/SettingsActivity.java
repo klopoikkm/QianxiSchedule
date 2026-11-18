@@ -30,8 +30,6 @@ import com.qianxi.schedule.silence.AlarmScheduler;
 import com.qianxi.schedule.silence.SilenceState;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -42,11 +40,12 @@ import java.util.Locale;
 public final class SettingsActivity extends Activity {
     private static final int REQUEST_EXPORT_BACKUP = 41;
     private static final int REQUEST_IMPORT_BACKUP = 42;
-    private static final int REQUEST_PICK_BACKGROUND = 43;
+    private static final int REQUEST_EDIT_BACKGROUND = 43;
     private AppSettings settings;
     private Switch autoSilent;
     private TextView permissionStatus;
     private TextView semesterValue;
+    private TextView backgroundDetail;
     private BackupManager.Backup pendingBackup;
 
     @Override
@@ -182,14 +181,24 @@ public final class SettingsActivity extends Activity {
         content.addView(heightRow);
 
         LinearLayout bgRow = row();
-        bgRow.addView(labels("课表背景图片", "从相册选择一张图片作为课表背景"),
+        LinearLayout bgLabels = labels("课表背景图片", "选择图片，预览并调整裁剪和缩放");
+        backgroundDetail = (TextView) bgLabels.getChildAt(1);
+        bgRow.addView(bgLabels,
                 new LinearLayout.LayoutParams(0, Ui.dp(this, 70), 1));
-        Button pickBg = Ui.textButton(this, "选择");
+        Button pickBg = Ui.textButton(this, "编辑");
         pickBg.setOnClickListener(v -> pickBackground());
         Button clearBg = Ui.textButton(this, "清除");
         clearBg.setOnClickListener(v -> {
-            settings.setBackgroundPath("");
-            Toast.makeText(this, "已恢复默认背景", Toast.LENGTH_SHORT).show();
+            String previous = settings.backgroundPath();
+            String previousSource = settings.backgroundSourcePath();
+            if (settings.saveBackground("", "", 1f, 0.5f, 0.5f)) {
+                BackgroundImageStore.deleteOwned(this, previous);
+                BackgroundImageStore.deleteOwned(this, previousSource);
+                updateBackgroundStatus();
+                Toast.makeText(this, "已恢复默认背景", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "清除背景失败，请重试", Toast.LENGTH_SHORT).show();
+            }
         });
         bgRow.addView(pickBg, new LinearLayout.LayoutParams(Ui.dp(this, 60), Ui.dp(this, 52)));
         bgRow.addView(clearBg, new LinearLayout.LayoutParams(Ui.dp(this, 60), Ui.dp(this, 52)));
@@ -346,46 +355,28 @@ public final class SettingsActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_EDIT_BACKGROUND) {
+            updateBackgroundStatus();
+            return;
+        }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         if (requestCode == REQUEST_EXPORT_BACKUP) writeBackup(data.getData());
         else if (requestCode == REQUEST_IMPORT_BACKUP) readBackup(data.getData());
-        else if (requestCode == REQUEST_PICK_BACKGROUND) copyBackground(data.getData());
     }
 
     private void pickBackground() {
-        try {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.setType("image/*");
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            startActivityForResult(intent, REQUEST_PICK_BACKGROUND);
-        } catch (Exception exception) {
-            Toast.makeText(this, "系统不支持选择图片", Toast.LENGTH_SHORT).show();
-        }
+        Intent intent = new Intent(this, BackgroundEditorActivity.class);
+        intent.putExtra(BackgroundEditorActivity.EXTRA_VIEWPORT_WIDTH,
+                getIntent().getIntExtra(BackgroundEditorActivity.EXTRA_VIEWPORT_WIDTH, 0));
+        intent.putExtra(BackgroundEditorActivity.EXTRA_VIEWPORT_HEIGHT,
+                getIntent().getIntExtra(BackgroundEditorActivity.EXTRA_VIEWPORT_HEIGHT, 0));
+        startActivityForResult(intent, REQUEST_EDIT_BACKGROUND);
     }
 
-    /**
-     * Copies the chosen image into app-private storage (filesDir/background.img). SAF content URIs
-     * lose their grant across restarts, so a local copy keeps the background working long-term.
-     */
-    private void copyBackground(Uri uri) {
-        File target = new File(getFilesDir(), "background.img");
-        try (InputStream input = getContentResolver().openInputStream(uri);
-             FileOutputStream output = new FileOutputStream(target)) {
-            if (input == null) throw new java.io.IOException("无法读取所选图片");
-            byte[] chunk = new byte[8192];
-            int total = 0;
-            int count;
-            while ((count = input.read(chunk)) != -1) {
-                total += count;
-                if (total > 12 * 1024 * 1024) throw new java.io.IOException("图片过大（超过 12MB）");
-                output.write(chunk, 0, count);
-            }
-            output.flush();
-            settings.setBackgroundPath(target.getAbsolutePath());
-            Toast.makeText(this, "背景已设置", Toast.LENGTH_SHORT).show();
-        } catch (Exception exception) {
-            Toast.makeText(this, "设置背景失败：" + exception.getMessage(), Toast.LENGTH_LONG).show();
-        }
+    private void updateBackgroundStatus() {
+        if (backgroundDetail == null) return;
+        backgroundDetail.setText(settings.backgroundPath().isEmpty()
+                ? "选择图片，预览并调整裁剪和缩放" : "已设置背景，可重新裁剪或选择新图片");
     }
 
     private void writeBackup(Uri uri) {
@@ -460,6 +451,7 @@ public final class SettingsActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updateStatus();
+        updateBackgroundStatus();
         if (settings.autoSilentEnabled()) AlarmScheduler.reschedule(this);
     }
 

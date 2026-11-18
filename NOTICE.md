@@ -19,3 +19,8 @@ does not collect or transmit the user's EAMS password.
 The app bundles jQuery 1.7.2 (MIT License) as a compatibility fallback for
 legacy EAMS pages whose remote jQuery resource cannot be loaded by Android
 WebView. Copyright 2012 jQuery Foundation and other contributors.
+
+The background editor uses AndroidX ExifInterface 1.4.2 to read photo
+orientation on Android 8. Copyright The Android Open Source Project.
+It is distributed under the Apache License, Version 2.0; the license and
+attribution are included in the APK under `assets/licenses/`.

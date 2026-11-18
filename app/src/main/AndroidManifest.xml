@@ -17,6 +17,8 @@
         android:usesCleartextTraffic="true">
 
         <activity android:name=".ui.SettingsActivity" android:exported="false" />
+        <activity android:name=".ui.BackgroundEditorActivity" android:exported="false"
+            android:configChanges="orientation|screenSize" />
         <activity android:name=".ui.ImportActivity" android:exported="false" />
         <activity android:name=".ui.CourseEditorActivity" android:exported="false" />
         <activity android:name=".ui.ClassTimesActivity" android:exported="false" />

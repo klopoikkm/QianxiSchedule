@@ -67,5 +67,5 @@ jobs:
           SOURCE_ZIP="QianxiSchedule-${VERSION}-source.zip"
           git archive --format=zip --prefix="QianxiSchedule-${VERSION}/" -o "$SOURCE_ZIP" HEAD
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --title "潜溪课表 ${VERSION}" --generate-notes
+            gh release create "$GITHUB_REF_NAME" --title "潜溪课表 ${VERSION}" --notes-file RELEASE_NOTES.md --latest
           gh release upload "$GITHUB_REF_NAME" "$RELEASE_APK" "$SOURCE_ZIP" USAGE.md --clobber

@@ -117,6 +117,34 @@ public final class AppSettings {
         preferences.edit().putString("background_path", path == null ? "" : path).apply();
     }
 
+    /** Original image retained for subsequent edits; old versions only stored background_path. */
+    public String backgroundSourcePath() {
+        return preferences.getString("background_source_path", backgroundPath());
+    }
+
+    public float backgroundZoom() {
+        return preferences.getFloat("background_zoom", 1f);
+    }
+
+    public float backgroundFocusX() {
+        return preferences.getFloat("background_focus_x", 0.5f);
+    }
+
+    public float backgroundFocusY() {
+        return preferences.getFloat("background_focus_y", 0.5f);
+    }
+
+    /** Commit all image references together before the editor removes superseded files. */
+    public boolean saveBackground(String path, String sourcePath, float zoom, float focusX, float focusY) {
+        return preferences.edit()
+                .putString("background_path", path)
+                .putString("background_source_path", sourcePath)
+                .putFloat("background_zoom", zoom)
+                .putFloat("background_focus_x", focusX)
+                .putFloat("background_focus_y", focusY)
+                .commit();
+    }
+
     /**
      * Text enhancement mode for better readability over background images.
      * 0 = none (default), 1 = light overlay, 2 = dark overlay
