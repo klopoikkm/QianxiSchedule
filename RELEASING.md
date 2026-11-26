@@ -6,7 +6,7 @@ Android requires every update to be signed by the same private key. Losing the k
 
 Before publishing, update `versionCode` and `versionName` in `app/build.gradle.kts`,
 the latest version in `USAGE.md`, `CHANGELOG.md` and the Chinese release body in
-`RELEASE_NOTES.md`. The tag must match the app version (for example `v1.18.9`).
+`RELEASE_NOTES.md`. The tag must match the app version (for example `v1.18.10`).
 Tag builds publish the signed APK, source ZIP and `USAGE.md` with the existing
 release asset names, and use `RELEASE_NOTES.md` as the release description.
 
@@ -25,7 +25,7 @@ Then run:
 ./gradlew.bat testDebugUnitTest lintDebug assembleRelease
 ```
 
-With an Android emulator or test device connected, run the image and editor
+With an Android emulator or test device connected, run the weekly swipe, image and editor
 interaction checks with `./gradlew.bat connectedDebugAndroidTest`.
 
 ## GitHub secrets

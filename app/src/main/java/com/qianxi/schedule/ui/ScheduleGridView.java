@@ -65,6 +65,8 @@ public final class ScheduleGridView extends LinearLayout {
 
     private final LinearLayout header;
     private final LinearLayout body;
+    private final ScrollView scroll;
+    private int pendingScrollPosition = -1;
     private Listener listener;
     private List<AppSettings.ClassTime> classTimes = new ArrayList<>();
     private LocalDate weekStart = LocalDate.now();
@@ -81,7 +83,15 @@ public final class ScheduleGridView extends LinearLayout {
         addView(header, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        ScrollView scroll = new ScrollView(context);
+        scroll = new ScrollView(context) {
+            @Override protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+                super.onLayout(changed, left, top, right, bottom);
+                if (pendingScrollPosition >= 0) {
+                    scrollTo(0, pendingScrollPosition);
+                    pendingScrollPosition = -1;
+                }
+            }
+        };
         scroll.setFillViewport(false);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.setVerticalScrollBarEnabled(false);
@@ -95,6 +105,21 @@ public final class ScheduleGridView extends LinearLayout {
 
     public void setListener(Listener listener) {
         this.listener = listener;
+    }
+
+    public int verticalScrollPosition() {
+        return pendingScrollPosition >= 0 ? pendingScrollPosition : scroll.getScrollY();
+    }
+
+    /** A newly bound page restores its position once its rows have been measured. */
+    public void restoreVerticalScrollPosition(int position) {
+        pendingScrollPosition = Math.max(0, position);
+        if (scroll.isLaidOut() && !scroll.isLayoutRequested()) {
+            scroll.scrollTo(0, pendingScrollPosition);
+            pendingScrollPosition = -1;
+        } else {
+            scroll.requestLayout();
+        }
     }
 
     /** Sets the per-period row height in dp (user-adjustable via settings). */

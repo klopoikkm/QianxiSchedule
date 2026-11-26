@@ -24,3 +24,8 @@ The background editor uses AndroidX ExifInterface 1.4.2 to read photo
 orientation on Android 8. Copyright The Android Open Source Project.
 It is distributed under the Apache License, Version 2.0; the license and
 attribution are included in the APK under `assets/licenses/`.
+
+Weekly swipe navigation uses AndroidX ViewPager2 1.1.0 and its AndroidX
+dependencies, including RecyclerView. Copyright The Android Open Source Project.
+These components are distributed under the Apache License, Version 2.0;
+the license and attribution are included in the APK under `assets/licenses/`.

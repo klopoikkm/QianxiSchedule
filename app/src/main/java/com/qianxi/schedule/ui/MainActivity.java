@@ -9,9 +9,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -32,10 +30,10 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 
-public final class MainActivity extends Activity implements ScheduleGridView.Listener {
+public final class MainActivity extends Activity implements ScheduleWeekPager.Listener {
     private AppSettings settings;
     private CourseDatabase database;
-    private ScheduleGridView scheduleGrid;
+    private ScheduleWeekPager schedulePager;
     private ImageView backgroundImage;
     private View textEnhanceOverlay;
     private TextView weekLabel;
@@ -71,7 +69,9 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
         super.onCreate(state);
         settings = new AppSettings(this);
         database = CourseDatabase.get(this);
-        selectedWeek = ScheduleTime.weekOf(settings.semesterStart(), LocalDate.now());
+        int currentWeek = Math.min(60, ScheduleTime.weekOf(settings.semesterStart(), LocalDate.now()));
+        selectedWeek = state == null ? currentWeek
+                : Math.max(1, Math.min(60, state.getInt("selected_week", currentWeek)));
         // Draw edge-to-edge so the background image (or gradient) fills behind the status and
         // navigation bars instead of leaving a paper-coloured strip under the phone's info bar.
         getWindow().setStatusBarColor(Color.TRANSPARENT);
@@ -80,6 +80,7 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
                 View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                         | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
         View content = buildContent();
+        if (state != null) schedulePager.restoreVerticalScrollPosition(state.getInt("schedule_scroll", 0));
         // Inset only the content layer, not the root: the background ImageView must stay full-bleed
         // (reaching under both system bars) while the toolbar/grid keep clear of them.
         Ui.applySystemBarInsets(insetTarget);
@@ -153,10 +154,8 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
         todayBg.setCornerRadius(Ui.dp(this, 12));
         todayWeek.setBackground(todayBg);
         todayWeek.setPadding(Ui.dp(this, 9), 0, Ui.dp(this, 9), 0);
-        todayWeek.setOnClickListener(v -> {
-            selectedWeek = ScheduleTime.weekOf(settings.semesterStart(), LocalDate.now());
-            refresh();
-        });
+        todayWeek.setOnClickListener(v -> schedulePager.showWeek(
+                ScheduleTime.weekOf(settings.semesterStart(), LocalDate.now())));
         LinearLayout.LayoutParams todayParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, Ui.dp(this, 26));
         todayParams.setMargins(Ui.dp(this, 2), 0, Ui.dp(this, 2), 0);
@@ -184,13 +183,10 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
 
         // The schedule now spans the full width (no side margins, no card chrome) so each of the
         // seven day columns is as wide as possible and course names stop wrapping to one character.
-        // Wrap it in a horizontal-swipe container so a left/right fling changes the week (WakeUp
-        // parity). The inner ScheduleGridView owns vertical scrolling — we only intercept when the
-        // gesture is clearly sideways, so the vertical scroll keeps working untouched.
-        FrameLayout scheduleContainer = buildSwipeContainer();
-        scheduleGrid = new ScheduleGridView(this);
-        scheduleGrid.setListener(this);
-        scheduleContainer.addView(scheduleGrid, new FrameLayout.LayoutParams(
+        // The pager slides complete weekly grids; each grid still scrolls vertically on its own.
+        FrameLayout scheduleContainer = new FrameLayout(this);
+        schedulePager = new ScheduleWeekPager(this, this);
+        scheduleContainer.addView(schedulePager, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         emptyState = Ui.text(this, "暂无课程，点击 + 添加或导入", 14, Ui.MUTED);
@@ -255,6 +251,13 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
         ticker.removeCallbacks(minuteTick);
     }
 
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        state.putInt("selected_week", schedulePager.selectedWeek());
+        state.putInt("schedule_scroll", schedulePager.verticalScrollPosition());
+        super.onSaveInstanceState(state);
+    }
+
     /** Wakes at the next wall-clock minute so the summary flips exactly when a period does. */
     private void scheduleNextTick() {
         ticker.removeCallbacks(minuteTick);
@@ -302,20 +305,32 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
     }
 
     private void changeWeek(int amount) {
-        selectedWeek = Math.max(1, Math.min(60, selectedWeek + amount));
-        refresh();
+        schedulePager.showWeek(schedulePager.selectedWeek() + amount);
+    }
+
+    @Override
+    public void onWeekSelected(int week) {
+        selectedWeek = week;
+        updateWeekHeader();
     }
 
     private void refresh() {
-        LocalDate start = ScheduleTime.weekStart(settings.semesterStart(), selectedWeek);
         // One table read per refresh: the viewed week and the summary are both derived from it,
         // where each database call used to re-scan the whole courses table.
         loadedCourses = database.all();
         renderedDate = LocalDate.now();
-        List<Course> courses = new java.util.ArrayList<>();
-        for (Course course : loadedCourses) {
-            if (course.occursInWeek(selectedWeek)) courses.add(course);
-        }
+        schedulePager.setData(loadedCourses, settings.semesterStart(), settings.classTimes(),
+                settings.itemHeightDp(), selectedWeek);
+        updateWeekHeader();
+        silentStatus.setText(settings.autoSilentEnabled() ? "· 静音已开" : "· 静音未开");
+        silentStatus.setTextColor(settings.autoSilentEnabled() ? Ui.PRIMARY : Ui.MUTED);
+        // A blank teaching week is valid; show the prompt only when the entire timetable is empty.
+        emptyState.setVisibility(loadedCourses.isEmpty() ? View.VISIBLE : View.GONE);
+        updateSummary(loadedCourses);
+    }
+
+    private void updateWeekHeader() {
+        LocalDate start = ScheduleTime.weekStart(settings.semesterStart(), selectedWeek);
         // Big title (WakeUp parity): the top date is unconditionally today's real date, regardless
         // of which week is being viewed. WakeUp's CourseUtils.getTodayDate() never looks at the
         // selected week, and neither should we — the previous "today if selectedWeek==currentWeek
@@ -324,69 +339,6 @@ public final class MainActivity extends Activity implements ScheduleGridView.Lis
         DateTimeFormatter range = DateTimeFormatter.ofPattern("M.d", Locale.CHINA);
         weekSubLabel.setText(String.format(Locale.CHINA, "第 %d 周  %s–%s", selectedWeek,
                 start.format(range), start.plusDays(6).format(range)));
-        silentStatus.setText(settings.autoSilentEnabled() ? "· 静音已开" : "· 静音未开");
-        silentStatus.setTextColor(settings.autoSilentEnabled() ? Ui.PRIMARY : Ui.MUTED);
-        scheduleGrid.setItemHeightDp(settings.itemHeightDp());
-        scheduleGrid.setData(courses, start, settings.classTimes());
-        // A blank teaching week is valid (odd/even weeks, holidays, late semester). Only show the
-        // add/import prompt when the entire timetable is empty; otherwise leave the week grid clean.
-        emptyState.setVisibility(loadedCourses.isEmpty() ? View.VISIBLE : View.GONE);
-        updateSummary(loadedCourses);
-    }
-
-    /**
-     * FrameLayout that treats a decisive horizontal swipe as a week change (like WakeUp): swipe
-     * right → previous week, swipe left → next week. Small movements and mostly-vertical drags are
-     * left to the schedule grid's own vertical ScrollView. Once a horizontal swipe is claimed the
-     * gesture is consumed for the rest of the gesture, so a swipe never doubles as a course tap.
-     */
-    private FrameLayout buildSwipeContainer() {
-        final int slop = ViewConfiguration.get(this).getScaledTouchSlop();
-        final int minSwipePx = Ui.dp(this, 48);
-        return new FrameLayout(this) {
-            private float downX, downY;
-            private boolean claimed;
-
-            @Override
-            public boolean onInterceptTouchEvent(MotionEvent ev) {
-                switch (ev.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        downX = ev.getX();
-                        downY = ev.getY();
-                        claimed = false;
-                        return false;
-                    case MotionEvent.ACTION_MOVE:
-                        float dx = ev.getX() - downX;
-                        float dy = ev.getY() - downY;
-                        if (!claimed && Math.abs(dx) > slop && Math.abs(dx) > Math.abs(dy) * 1.4f) {
-                            claimed = true;
-                            return true;
-                        }
-                        return false;
-                    default:
-                        return false;
-                }
-            }
-
-            @Override
-            public boolean onTouchEvent(MotionEvent ev) {
-                switch (ev.getActionMasked()) {
-                    case MotionEvent.ACTION_UP:
-                        if (claimed) {
-                            float dx = ev.getX() - downX;
-                            if (Math.abs(dx) >= minSwipePx) changeWeek(dx > 0 ? -1 : 1);
-                            claimed = false;
-                            return true;
-                        }
-                        return false;
-                    case MotionEvent.ACTION_CANCEL:
-                        claimed = false;
-                        return false;
-                    default:
-                        return claimed;
-                }
-            }
-        };
     }
 
     /** Small transparent icon/label button used by the top-right week navigation and "+" menu. */

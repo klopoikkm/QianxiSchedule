@@ -19,8 +19,8 @@ android {
         applicationId = "com.qianxi.schedule"
         minSdk = 26
         targetSdk = 35
-        versionCode = 58
-        versionName = "1.18.9"
+        versionCode = 59
+        versionName = "1.18.10"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -58,6 +58,7 @@ android {
 
 dependencies {
     implementation("androidx.exifinterface:exifinterface:1.4.2")
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test:runner:1.7.0")
